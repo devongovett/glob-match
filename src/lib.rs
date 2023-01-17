@@ -149,7 +149,7 @@ pub fn glob_match(glob: &str, path: &str) -> bool {
               is_match = true;
             }
           }
-          if state.glob_index < glob.len() && glob[state.glob_index] != b']' {
+          if state.glob_index >= glob.len() || glob[state.glob_index] != b']' {
             // invalid pattern!
             return false;
           }
@@ -195,6 +195,8 @@ pub fn glob_match(glob: &str, path: &str) -> bool {
           }
           state.path_index = brace_stack[brace_ptr - 1].path_index;
           state.glob_index += 1;
+          state.next_path_index = 0;
+          state.next_glob_index = 0;
           continue;
         }
         mut c if state.path_index < path.len() => {
@@ -1844,5 +1846,14 @@ mod tests {
     assert!(glob_match("a/*/ab??.md", "a/bbb/abcd.md"));
     assert!(glob_match("a/bbb/ab??.md", "a/bbb/abcd.md"));
     assert!(glob_match("a/bbb/ab???md", "a/bbb/abcd.md"));
+  }
+
+  #[test]
+  fn fuzz_tests() {
+    // https://github.com/devongovett/glob-match/issues/1
+    let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
+    assert!(!glob_match(s, s));
+    let s = "**** *{*{??*{??***\u{5} *{*{??*{??***\u{5},\0U\0}]*****\u{1},\0***\0,\0\0}w****,\0U\0}]*****\u{1},\0***\0,\0\0}w*****\u{1}***{}*.*\0\0*\0";
+    assert!(!glob_match(s, s));
   }
 }
