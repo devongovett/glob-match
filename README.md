@@ -2,10 +2,10 @@
 
 An extremely fast glob matching library with support for wildcards, character classes, and brace expansion.
 
-* Linear time matching. No exponential backtracking.
-* Zero allocations.
-* No regex compilation. Matching occurs on the glob pattern in place.
-* Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
+- Linear time matching. No exponential backtracking.
+- Zero allocations.
+- No regex compilation. Matching occurs on the glob pattern in place.
+- Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
 
 ## Example
 
@@ -18,7 +18,7 @@ assert!(glob_match("some/**/{a,b,c}/**/needle.txt", "some/path/a/to/the/needle.t
 ## Syntax
 
 | Syntax  | Meaning                                                                                                                                                                                             |
-|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `?`     | Matches any single character.                                                                                                                                                                       |
 | `*`     | Matches zero or more characters, except for path separators (e.g. `/`).                                                                                                                             |
 | `**`    | Matches zero or more characters, including path separators. Must match a complete path segment (i.e. followed by a `/` or the end of the pattern).                                                  |
@@ -42,11 +42,15 @@ You can fuzz `glob-match` itself using `cargo fuzz`. See the
 guidance on setup and installation. Follow the Rust Fuzz Book for information on
 how to configure and run Fuzz steps.
 
-After discovering artifacts, run the `fuzz/examples/read_artifact.rs` example
-file to decode the input data for the fixture. For example, the following
-command would decode the data for a dummy local failure:
+After discovering artifacts, use `cargo fuzz fmt [target] [artifact-path]` to
+get the original input back.
 
 ```sh
-$ cargo run --example read_artifact both_fuzz slow-unit-10a6ee5dff3096e44a9946c8207775a61c307ca4
-Data { pat: "something-really-long", input: "foo" }
+$ cargo fuzz fmt both_fuzz fuzz/artifacts/both_fuzz/slow-unit-LONG_HASH
+Output of `std::fmt::Debug`:
+
+Data {
+    pat: "some pattern",
+    input: "some input",
+}
 ```
