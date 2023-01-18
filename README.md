@@ -34,3 +34,19 @@ globset                 time:   [35.176 µs 35.200 µs 35.235 µs]
 glob                    time:   [339.77 ns 339.94 ns 340.13 ns]
 glob_match              time:   [163.31 ns 163.34 ns 163.38 ns]
 ```
+
+## Fuzzing
+
+You can fuzz `glob-match` itself using `cargo fuzz`. See the
+[Rust Fuzz Book](https://rust-fuzz.github.io/book/cargo-fuzz/setup.html) for
+guidance on setup and installation. Follow the Rust Fuzz Book for information on
+how to configure and run Fuzz steps.
+
+After discovering artifacts, run the `fuzz/examples/read_artifact.rs` example
+file to decode the input data for the fixture. For example, the following
+command would decode the data for a dummy local failure:
+
+```sh
+$ cargo run --example read_artifact both_fuzz slow-unit-10a6ee5dff3096e44a9946c8207775a61c307ca4
+Data { pat: "something-really-long", input: "foo" }
+```
