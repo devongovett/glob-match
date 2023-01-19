@@ -27,12 +27,6 @@ struct Wildcard {
   capture_index: usize,
 }
 
-// #[derive(Clone, Copy, Debug, Default)]
-// pub struct Capture {
-//   start: usize,
-//   end: usize,
-// }
-
 type Capture = Range<usize>;
 
 pub fn glob_match(glob: &str, path: &str) -> bool {
@@ -48,20 +42,19 @@ pub fn glob_match_with_captures<'a>(glob: &str, path: &'a str) -> Option<Vec<Cap
 }
 
 fn glob_match_internal<'a>(
-  glob_str: &str,
-  path_str: &'a str,
+  glob: &str,
+  path: &'a str,
   mut captures: Option<&mut Vec<Capture>>,
 ) -> bool {
   // This algorithm is based on https://research.swtch.com/glob
-  let glob = glob_str.as_bytes();
-  let path = path_str.as_bytes();
+  let glob = glob.as_bytes();
+  let path = path.as_bytes();
 
   let mut state = State::default();
 
   // Store the state when we see an opening '{' brace in a stack.
   // Up to 10 nested braces are supported.
-  let mut brace_stack = [State::default(); 10];
-  let mut brace_ptr = 0;
+  let mut brace_stack = BraceStack::default();
   let mut longest_brace_match = 0;
 
   // First, check if the pattern is negated with a leading '!' character.
@@ -73,37 +66,23 @@ fn glob_match_internal<'a>(
   }
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
-    println!("{:?} {:?}", state.glob_index, glob.len());
     if !state.allow_sep
       && state.path_index < path.len()
       && is_separator(path[state.path_index] as char)
     {
-      if let Some(captures) = &mut captures {
-        if state.wildcard.path_index > 0 && state.capture_index < captures.len() {
-          captures[state.capture_index].end = state.path_index;
-        }
-      }
       state.wildcard.path_index = 0;
       state.allow_sep = true;
     }
 
+    // Extend the active capture, if any.
+    state.extend_capture(&mut captures);
+
     if state.glob_index < glob.len() {
       match glob[state.glob_index] {
         b'*' => {
-          if let Some(captures) = &mut captures {
-            if state.glob_index != state.wildcard.glob_index {
-              println!("X {:?} {:?}", state.path_index, state.glob_index);
-              state.wildcard.capture_index = state.capture_index;
-              add_capture(
-                captures,
-                state.capture_index,
-                Capture {
-                  start: state.path_index,
-                  end: state.path_index,
-                },
-              );
-              state.capture_index += 1;
-            }
+          if captures.is_some() && state.glob_index != state.wildcard.glob_index {
+            state.wildcard.capture_index = state.capture_index;
+            state.begin_capture(&mut captures, state.path_index..state.path_index);
           }
 
           state.wildcard.glob_index = state.glob_index;
@@ -113,23 +92,10 @@ fn glob_match_internal<'a>(
           state.allow_sep = state.saw_globstar;
           state.needs_sep = false;
 
-          // if let Some(captures) = &captures {
-          //   state.wildcard.captures_len = captures.len();
-          // }
-
-          // println!("START {:?} {:?}", state.capture, state.path_index);
-          // capture_start(&mut state.capture, &mut captures, state.path_index);
-          // state.wildcard.capture = state.capture;
-
-          let mut count = 1;
-          while state.glob_index < glob.len() && glob[state.glob_index] == b'*' {
-            count += 1;
-            state.glob_index += 1;
-          }
-
           // ** allows path separators, whereas * does not.
           // However, ** must be a full path component, i.e. a/**/b not a**b.
-          if count == 2 {
+          if state.glob_index < glob.len() && glob[state.glob_index] == b'*' {
+            state.glob_index += 1;
             if glob.len() == state.glob_index {
               state.allow_sep = true;
             } else if (state.glob_index < 3 || is_separator(glob[state.glob_index - 3] as char))
@@ -152,19 +118,13 @@ fn glob_match_internal<'a>(
 
           // If the next char is a special brace separator,
           // skip to the end of the braces so we don't try to match it.
-          if brace_ptr > 0
+          if brace_stack.length > 0
             && state.glob_index < glob.len()
             && matches!(glob[state.glob_index], b',' | b'}')
           {
-            if !skip_braces(glob, &mut state.glob_index) {
+            if state.skip_braces(glob, &mut captures, false) == BraceState::Invalid {
               // invalid pattern!
               return false;
-            }
-            if let Some(captures) = &mut captures {
-              if state.capture_index < captures.len() {
-                captures[state.capture_index].end = state.path_index;
-                state.capture_index = brace_stack[brace_ptr].capture_index;
-              }
             }
           }
 
@@ -172,28 +132,7 @@ fn glob_match_internal<'a>(
         }
         b'?' if state.path_index < path.len() => {
           if !is_separator(path[state.path_index] as char) {
-            // if state.capture.start.is_some() && state.capture.end.is_none() {
-            //   state.capture.end = Some(state.path_index);
-            // }
-            // capture_end(&mut state.capture, &mut captures, path_str);
-            // if let Some(captures) = &mut captures {
-            //   captures.push(&path_str[state.path_index..state.path_index + 1]);
-            //   state.capture = Capture::default();
-            // }
-            if let Some(captures) = &mut captures {
-              if state.capture_index < captures.len() {
-                captures[state.capture_index].end = state.path_index;
-              }
-              add_capture(
-                captures,
-                state.capture_index,
-                Capture {
-                  start: state.path_index,
-                  end: state.path_index + 1,
-                },
-              );
-              state.capture_index += 1;
-            }
+            state.add_char_capture(&mut captures);
             state.glob_index += 1;
             state.path_index += 1;
             continue;
@@ -250,91 +189,36 @@ fn glob_match_internal<'a>(
           }
           state.glob_index += 1;
           if is_match != negated {
-            // if state.capture.start.is_some() && state.capture.end.is_none() {
-            //   state.capture.end = Some(state.path_index);
-            // }
-            // capture_end(&mut state.capture, &mut captures, path_str);
-            // if let Some(captures) = &mut captures {
-            //   captures.push(&path_str[state.path_index..state.path_index + 1]);
-            //   state.capture = Capture::default();
-            // }
-            if let Some(captures) = &mut captures {
-              if state.capture_index < captures.len() {
-                captures[state.capture_index].end = state.path_index;
-              }
-              add_capture(
-                captures,
-                state.capture_index,
-                Capture {
-                  start: state.path_index,
-                  end: state.path_index + 1,
-                },
-              );
-              state.capture_index += 1;
-            }
+            state.add_char_capture(&mut captures);
             state.path_index += 1;
             continue;
           }
         }
         b'{' if state.path_index < path.len() => {
-          if brace_ptr >= brace_stack.len() {
+          if brace_stack.length >= brace_stack.stack.len() {
             // Invalid pattern! Too many nested braces.
             return false;
           }
 
-          if let Some(captures) = &mut captures {
-            add_capture(
-              captures,
-              state.capture_index,
-              Capture {
-                start: state.path_index,
-                end: state.path_index,
-              },
-            );
-            // state.capture_index += 1;
-          }
+          state.end_capture(&mut captures);
+          state.begin_capture(&mut captures, state.path_index..state.path_index);
 
           // Push old state to the stack, and reset current state.
-          brace_stack[brace_ptr] = state;
-          brace_ptr += 1;
-          state = State {
-            path_index: state.path_index,
-            glob_index: state.glob_index + 1,
-            capture_index: state.capture_index + 1,
-            ..State::default()
-          };
+          state = brace_stack.push(&state);
           continue;
         }
-        b'}' if brace_ptr > 0 => {
+        b'}' if brace_stack.length > 0 => {
           // If we hit the end of the braces, we matched the last option.
-          brace_ptr -= 1;
+          longest_brace_match = longest_brace_match.max(state.path_index);
           state.glob_index += 1;
-          // state.capture_index = brace_stack[brace_ptr].capture_index;
-          if state.path_index < longest_brace_match {
-            state.path_index = longest_brace_match;
-          }
-          if brace_ptr == 0 {
-            longest_brace_match = 0;
-          }
-          // if state.capture.end.is_none() {
-          //   state.capture.end = Some(state.path_index);
-          // }
-          // capture_end(&mut state.capture, &mut captures, path_str);
-          if let Some(captures) = &mut captures {
-            if state.capture_index < captures.len() {
-              captures[state.capture_index].end = state.path_index;
-              state.capture_index = brace_stack[brace_ptr].capture_index;
-            }
-          }
+          state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
           continue;
         }
-        b',' if brace_ptr > 0 => {
+        b',' if brace_stack.length > 0 => {
           // If we hit a comma, we matched one of the options!
           // But we still need to check the others in case there is a longer match.
-          if state.path_index > longest_brace_match {
-            longest_brace_match = state.path_index;
-          }
-          state.path_index = brace_stack[brace_ptr - 1].path_index;
+          longest_brace_match = longest_brace_match.max(state.path_index);
+          state.path_index = brace_stack.stack[brace_stack.length - 1].path_index;
           state.glob_index += 1;
           state.wildcard = Wildcard::default();
           continue;
@@ -350,16 +234,14 @@ fn glob_match_internal<'a>(
             && (!state.needs_sep
               || (state.path_index > 0 && is_separator(path[state.path_index - 1] as char)))
           {
-            // if state.capture.start.is_some()
-            //   && state.capture.end.is_none()
-            //   && state.wildcard.path_index > 0
-            // {
-            //   state.capture.end = Some(state.path_index);
-            // }
-            if let Some(captures) = &mut captures {
-              if state.wildcard.path_index > 0 && state.capture_index < captures.len() {
-                captures[state.capture_index].end = state.path_index;
-              }
+            state.end_capture(&mut captures);
+
+            if brace_stack.length > 0
+              && state.wildcard.path_index > 0
+              && glob[state.glob_index - 1] == b'}'
+            {
+              longest_brace_match = state.path_index;
+              state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
             }
             state.glob_index += 1;
             state.path_index += 1;
@@ -377,92 +259,33 @@ fn glob_match_internal<'a>(
       state.glob_index = state.wildcard.glob_index;
       state.path_index = state.wildcard.path_index;
       state.capture_index = state.wildcard.capture_index;
-      if let Some(captures) = &mut captures {
-        // captures.truncate(state.wildcard.captures_len);
-        // state.capture = state.wildcard.capture;
-      }
       continue;
     }
 
-    if brace_ptr > 0 {
+    if brace_stack.length > 0 {
       // If in braces, find next option and reset path to index where we saw the '{'
-      let mut idx = state.glob_index;
-      let mut found_next = false;
-      let mut braces = 1;
-      while idx < glob.len() {
-        match glob[idx] {
-          b',' if braces == 1 => {
-            // Start matching from here.
-            state.glob_index = idx + 1;
-            state.path_index = brace_stack[brace_ptr - 1].path_index;
-            found_next = true;
-            break;
-          }
-          b'{' => {
-            // Skip nested braces.
-            braces += 1;
-            idx += 1;
-          }
-          b'}' => {
-            braces -= 1;
-            idx += 1;
-            if braces == 0 {
-              break;
-            }
-          }
-          b'\\' => {
-            idx += 2;
-          }
-          _ => idx += 1,
+      match state.skip_braces(glob, &mut captures, true) {
+        BraceState::Invalid => return false,
+        BraceState::Comma => {
+          state.path_index = brace_stack.stack[brace_stack.length - 1].path_index;
+          continue;
         }
-      }
-
-      if found_next {
-        continue;
-      }
-
-      if braces != 0 {
-        // Invalid pattern!
-        return false;
+        BraceState::EndBrace => {}
       }
 
       // Hit the end. Pop the stack.
-      brace_ptr -= 1;
-
       // If we matched a previous option, use that.
       if longest_brace_match > 0 {
-        state = State {
-          glob_index: idx,
-          path_index: longest_brace_match,
-          // Since we matched, preserve these flags.
-          allow_sep: state.allow_sep,
-          needs_sep: state.needs_sep,
-          saw_globstar: state.saw_globstar,
-          capture_index: brace_stack[brace_ptr].capture_index,
-          // But restore star state if needed later.
-          wildcard: brace_stack[brace_ptr].wildcard,
-        };
-        // if state.capture.end.is_none() {
-        //   state.capture.end = Some(state.path_index);
-        // }
-        println!("END");
-        if let Some(captures) = &mut captures {
-          if state.capture_index < captures.len() {
-            captures[state.capture_index].end = state.path_index;
-          }
-        }
+        state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
         continue;
       } else {
         // Didn't match. Restore state, and check if we need to jump back to a star pattern.
-        state = brace_stack[brace_ptr];
+        brace_stack.length -= 1;
+        state = brace_stack.stack[brace_stack.length];
         if state.wildcard.path_index > 0 && state.wildcard.path_index <= path.len() {
           state.glob_index = state.wildcard.glob_index;
           state.path_index = state.wildcard.path_index;
           state.capture_index = state.wildcard.capture_index;
-          if let Some(captures) = &mut captures {
-            // captures.truncate(state.wildcard.captures_len);
-            // state.capture = state.wildcard.capture;
-          }
           continue;
         }
       }
@@ -471,13 +294,14 @@ fn glob_match_internal<'a>(
     return negated;
   }
 
-  // println!("END {:?}", state.capture);
-  // capture_end(&mut state.capture, &mut captures, path_str);
-
-  if let Some(captures) = &mut captures {
-    if state.wildcard.path_index > 0 && state.capture_index < captures.len() {
-      captures[state.capture_index].end = state.path_index;
-    }
+  if brace_stack.length > 0
+    && state.wildcard.path_index > 0
+    && state.glob_index > 0
+    && state.glob_index - 1 < glob.len()
+    && glob[state.glob_index - 1] == b'}'
+  {
+    longest_brace_match = state.path_index;
+    brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
   }
 
   !negated
@@ -503,75 +327,159 @@ fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
   true
 }
 
-#[inline(always)]
-fn skip_braces(glob: &[u8], glob_index: &mut usize) -> bool {
-  let mut braces = 0;
-  while *glob_index < glob.len() {
-    match glob[*glob_index] {
-      // Skip nested braces.
-      b'{' => braces += 1,
-      b'}' => {
-        if braces > 0 {
-          braces -= 1;
-        } else {
-          break;
-        }
+#[derive(PartialEq)]
+enum BraceState {
+  Invalid,
+  Comma,
+  EndBrace,
+}
+
+impl State {
+  #[inline(always)]
+  fn begin_capture(&self, captures: &mut Option<&mut Vec<Capture>>, capture: Capture) {
+    if let Some(captures) = captures {
+      if self.capture_index < captures.len() {
+        captures[self.capture_index] = capture;
+      } else {
+        captures.push(capture);
       }
-      _ => {}
     }
-    *glob_index += 1;
   }
 
-  if *glob_index < glob.len() && glob[*glob_index] != b'}' {
-    // invalid pattern!
-    return false;
+  #[inline(always)]
+  fn extend_capture(&self, captures: &mut Option<&mut Vec<Capture>>) {
+    if let Some(captures) = captures {
+      if self.capture_index < captures.len() {
+        captures[self.capture_index].end = self.path_index;
+      }
+    }
   }
 
-  *glob_index += 1;
-  true
+  #[inline(always)]
+  fn end_capture(&mut self, captures: &mut Option<&mut Vec<Capture>>) {
+    if let Some(captures) = captures {
+      if self.capture_index < captures.len() {
+        self.capture_index += 1;
+      }
+    }
+  }
+
+  #[inline(always)]
+  fn add_char_capture(&mut self, captures: &mut Option<&mut Vec<Capture>>) {
+    self.end_capture(captures);
+    self.begin_capture(captures, self.path_index..self.path_index + 1);
+    self.capture_index += 1;
+  }
+
+  #[inline(always)]
+  fn skip_braces(
+    &mut self,
+    glob: &[u8],
+    captures: &mut Option<&mut Vec<Capture>>,
+    stop_on_comma: bool,
+  ) -> BraceState {
+    let mut braces = 1;
+    let mut in_brackets = false;
+    let mut capture_index = self.capture_index + 1;
+    while self.glob_index < glob.len() && braces > 0 {
+      match glob[self.glob_index] {
+        // Skip nested braces.
+        b'{' if !in_brackets => braces += 1,
+        b'}' if !in_brackets => braces -= 1,
+        b',' if stop_on_comma && braces == 1 && !in_brackets => {
+          self.glob_index += 1;
+          return BraceState::Comma;
+        }
+        c @ (b'*' | b'?' | b'[') if !in_brackets => {
+          if c == b'[' {
+            in_brackets = true;
+          }
+          if let Some(captures) = captures {
+            if capture_index < captures.len() {
+              captures[capture_index] = self.path_index..self.path_index;
+            } else {
+              captures.push(self.path_index..self.path_index);
+            }
+            capture_index += 1;
+          }
+        }
+        b']' => in_brackets = false,
+        b'\\' => {
+          self.glob_index += 1;
+        }
+        _ => {}
+      }
+      self.glob_index += 1;
+    }
+
+    if braces != 0 {
+      return BraceState::Invalid;
+    }
+
+    BraceState::EndBrace
+  }
 }
 
-#[inline]
-fn add_capture(captures: &mut Vec<Capture>, index: usize, capture: Capture) {
-  if index < captures.len() {
-    captures[index] = capture;
-  } else {
-    captures.push(capture);
+struct BraceStack {
+  stack: [State; 10],
+  length: usize,
+}
+
+impl Default for BraceStack {
+  #[inline]
+  fn default() -> Self {
+    // Manual implementation is faster than the automatically derived one.
+    BraceStack {
+      stack: [State::default(); 10],
+      length: 0,
+    }
   }
 }
 
-// #[inline]
-// fn capture_start<'a>(
-//   capture: &mut Capture,
-//   captures: &mut Option<&mut Vec<&'a str>>,
-//   path_index: usize,
-// ) {
-//   if captures.is_some() && capture.start.is_none() {
-//     *capture = Capture {
-//       start: Some(path_index),
-//       end: None,
-//     };
-//   }
-// }
+impl BraceStack {
+  #[inline(always)]
+  fn push(&mut self, state: &State) -> State {
+    // Push old state to the stack, and reset current state.
+    self.stack[self.length] = *state;
+    self.length += 1;
+    State {
+      path_index: state.path_index,
+      glob_index: state.glob_index + 1,
+      capture_index: state.capture_index + 1,
+      ..State::default()
+    }
+  }
 
-// #[inline]
-// fn capture_end<'a>(
-//   capture: &mut Capture,
-//   captures: &mut Option<&mut Vec<&'a str>>,
-//   path_str: &'a str,
-// ) {
-//   if let Some(captures) = captures {
-//     println!("END2 {:?}", capture);
-//     if let Capture {
-//       start: Some(start),
-//       end: Some(end),
-//     } = capture
-//     {
-//       captures.push(&path_str[*start..*end]);
-//       *capture = Capture::default();
-//     }
-//   }
-// }
+  #[inline(always)]
+  fn pop(
+    &mut self,
+    state: &State,
+    longest_brace_match: &mut usize,
+    captures: &mut Option<&mut Vec<Capture>>,
+  ) -> State {
+    self.length -= 1;
+    let mut state = State {
+      path_index: *longest_brace_match,
+      glob_index: state.glob_index,
+      // Since we matched, preserve these flags.
+      allow_sep: state.allow_sep,
+      needs_sep: state.needs_sep,
+      saw_globstar: state.saw_globstar,
+      // But restore star state if needed later.
+      wildcard: self.stack[self.length].wildcard,
+      capture_index: self.stack[self.length].capture_index,
+    };
+    if self.length == 0 {
+      *longest_brace_match = 0;
+    }
+    state.extend_capture(captures);
+    if let Some(captures) = captures {
+      state.capture_index = captures.len();
+    }
+
+    state
+  }
+}
 
 #[cfg(test)]
 mod tests {
@@ -679,6 +587,8 @@ mod tests {
     assert!(!glob_match("a/{a{a,b},b}", "a/ac"));
     assert!(glob_match("a/{a{a,b},b}", "a/b"));
     assert!(!glob_match("a/{a{a,b},b}", "a/c"));
+    assert!(glob_match("a/{b,c[}]*}", "a/b"));
+    assert!(glob_match("a/{b,c[}]*}", "a/c}xx"));
   }
 
   // The below tests are based on Bash and micromatch.
@@ -1984,6 +1894,7 @@ mod tests {
     assert!(glob_match("a/b/**/c{d,e}/**/xyz.md", "a/b/cd/xyz.md"));
     assert!(glob_match("a/b/**/{c,d,e}/**/xyz.md", "a/b/c/xyz.md"));
     assert!(glob_match("a/b/**/{c,d,e}/**/xyz.md", "a/b/d/xyz.md"));
+    assert!(glob_match("a/b/**/{c,d,e}/**/xyz.md", "a/b/e/xyz.md"));
 
     assert!(glob_match("*{a,b}*", "xax"));
     assert!(glob_match("*{a,b}*", "xxax"));
@@ -2077,29 +1988,51 @@ mod tests {
         .map(|v| v.into_iter().map(|capture| &path[capture]).collect())
     }
 
-    // assert_eq!(test_captures("a/*/c", "a/bx/c"), Some(vec!["bx"]));
-    // assert_eq!(test_captures("a/*/c", "a/test/c"), Some(vec!["test"]));
-    // // assert_eq!(
-    // //   test_captures("a/*/c/*/e", "a/b/c/d/e"),
-    // //   Some(vec!["b", "d"])
-    // // );
-    // // assert_eq!(
-    // //   test_captures("a/*/c/*/e", "a/b/c/d/e"),
-    // //   Some(vec!["b", "d"])
-    // // );
-    // assert_eq!(test_captures("a/{b,x}/c", "a/b/c"), Some(vec!["b"]));
-    // assert_eq!(test_captures("a/{b,x}/c", "a/x/c"), Some(vec!["x"]));
-    // assert_eq!(test_captures("a/?/c", "a/b/c"), Some(vec!["b"]));
-    // assert_eq!(test_captures("a/*?x/c", "a/yybx/c"), Some(vec!["yy", "b"]));
-    // assert_eq!(
-    //   test_captures("a/*[a-z]x/c", "a/yybx/c"),
-    //   Some(vec!["yy", "b"])
-    // );
+    assert_eq!(test_captures("a/*/c", "a/bx/c"), Some(vec!["bx"]));
+    assert_eq!(test_captures("a/*/c", "a/test/c"), Some(vec!["test"]));
+    assert_eq!(
+      test_captures("a/*/c/*/e", "a/b/c/d/e"),
+      Some(vec!["b", "d"])
+    );
+    assert_eq!(
+      test_captures("a/*/c/*/e", "a/b/c/d/e"),
+      Some(vec!["b", "d"])
+    );
+    assert_eq!(test_captures("a/{b,x}/c", "a/b/c"), Some(vec!["b"]));
+    assert_eq!(test_captures("a/{b,x}/c", "a/x/c"), Some(vec!["x"]));
+    assert_eq!(test_captures("a/?/c", "a/b/c"), Some(vec!["b"]));
+    assert_eq!(test_captures("a/*?x/c", "a/yybx/c"), Some(vec!["yy", "b"]));
+    assert_eq!(
+      test_captures("a/*[a-z]x/c", "a/yybx/c"),
+      Some(vec!["yy", "b"])
+    );
     assert_eq!(
       test_captures("a/{b*c,c}y", "a/bdcy"),
       Some(vec!["bdc", "d"])
     );
     assert_eq!(test_captures("a/{b*,c}y", "a/bdy"), Some(vec!["bd", "d"]));
+    assert_eq!(test_captures("a/{b*c,c}", "a/bdc"), Some(vec!["bdc", "d"]));
+    assert_eq!(test_captures("a/{b*,c}", "a/bd"), Some(vec!["bd", "d"]));
+    assert_eq!(test_captures("a/{b*,c}", "a/c"), Some(vec!["c", ""]));
+    assert_eq!(
+      test_captures("a/{b{c,d},c}y", "a/bdy"),
+      Some(vec!["bd", "d"])
+    );
+    assert_eq!(
+      test_captures("a/{b*,c*}y", "a/bdy"),
+      Some(vec!["bd", "d", ""])
+    );
+    assert_eq!(
+      test_captures("a/{b*,c*}y", "a/cdy"),
+      Some(vec!["cd", "", "d"])
+    );
+    assert_eq!(test_captures("a/{b,c}", "a/b"), Some(vec!["b"]));
+    assert_eq!(test_captures("a/{b,c}", "a/c"), Some(vec!["c"]));
+    assert_eq!(test_captures("a/{b,c[}]*}", "a/b"), Some(vec!["b", "", ""]));
+    assert_eq!(
+      test_captures("a/{b,c[}]*}", "a/c}xx"),
+      Some(vec!["c}xx", "}", "xx"])
+    );
   }
 
   #[test]
