@@ -66,14 +66,6 @@ fn glob_match_internal<'a>(
   }
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
-    if !state.allow_sep
-      && state.path_index < path.len()
-      && is_separator(path[state.path_index] as char)
-    {
-      state.wildcard.path_index = 0;
-      state.allow_sep = true;
-    }
-
     // Extend the active capture, if any.
     state.extend_capture(&mut captures);
 
@@ -114,6 +106,10 @@ fn glob_match_internal<'a>(
           }
           if state.allow_sep {
             state.saw_globstar = true;
+          } else if state.path_index < path.len() && is_separator(path[state.path_index] as char) {
+            // End * wildcard if we hit a separator.
+            state.wildcard.path_index = 0;
+            state.allow_sep = true;
           }
 
           // If the next char is a special brace separator,
@@ -256,9 +252,7 @@ fn glob_match_internal<'a>(
 
     // If we didn't match, restore state to the previous star pattern.
     if state.wildcard.path_index > 0 && state.wildcard.path_index <= path.len() {
-      state.glob_index = state.wildcard.glob_index;
-      state.path_index = state.wildcard.path_index;
-      state.capture_index = state.wildcard.capture_index;
+      state.backtrack();
       continue;
     }
 
@@ -283,9 +277,7 @@ fn glob_match_internal<'a>(
         brace_stack.length -= 1;
         state = brace_stack.stack[brace_stack.length];
         if state.wildcard.path_index > 0 && state.wildcard.path_index <= path.len() {
-          state.glob_index = state.wildcard.glob_index;
-          state.path_index = state.wildcard.path_index;
-          state.capture_index = state.wildcard.capture_index;
+          state.backtrack();
           continue;
         }
       }
@@ -335,6 +327,13 @@ enum BraceState {
 }
 
 impl State {
+  #[inline(always)]
+  fn backtrack(&mut self) {
+    self.glob_index = self.wildcard.glob_index;
+    self.path_index = self.wildcard.path_index;
+    self.capture_index = self.wildcard.capture_index;
+  }
+
   #[inline(always)]
   fn begin_capture(&self, captures: &mut Option<&mut Vec<Capture>>, capture: Capture) {
     if let Some(captures) = captures {
