@@ -2,10 +2,10 @@
 
 An extremely fast glob matching library with support for wildcards, character classes, and brace expansion.
 
-* Linear time matching. No exponential backtracking.
-* Zero allocations.
-* No regex compilation. Matching occurs on the glob pattern in place.
-* Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
+- Linear time matching. No exponential backtracking.
+- Zero allocations.
+- No regex compilation. Matching occurs on the glob pattern in place.
+- Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
 
 ## Example
 
@@ -18,7 +18,7 @@ assert!(glob_match("some/**/{a,b,c}/**/needle.txt", "some/path/a/to/the/needle.t
 ## Syntax
 
 | Syntax  | Meaning                                                                                                                                                                                             |
-|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `?`     | Matches any single character.                                                                                                                                                                       |
 | `*`     | Matches zero or more characters, except for path separators (e.g. `/`).                                                                                                                             |
 | `**`    | Matches zero or more characters, including path separators. Must match a complete path segment (i.e. followed by a `/` or the end of the pattern).                                                  |
@@ -33,4 +33,24 @@ assert!(glob_match("some/**/{a,b,c}/**/needle.txt", "some/path/a/to/the/needle.t
 globset                 time:   [35.176 µs 35.200 µs 35.235 µs]
 glob                    time:   [339.77 ns 339.94 ns 340.13 ns]
 glob_match              time:   [163.31 ns 163.34 ns 163.38 ns]
+```
+
+## Fuzzing
+
+You can fuzz `glob-match` itself using `cargo fuzz`. See the
+[Rust Fuzz Book](https://rust-fuzz.github.io/book/cargo-fuzz/setup.html) for
+guidance on setup and installation. Follow the Rust Fuzz Book for information on
+how to configure and run Fuzz steps.
+
+After discovering artifacts, use `cargo fuzz fmt [target] [artifact-path]` to
+get the original input back.
+
+```sh
+$ cargo fuzz fmt both_fuzz fuzz/artifacts/both_fuzz/slow-unit-LONG_HASH
+Output of `std::fmt::Debug`:
+
+Data {
+    pat: "some pattern",
+    input: "some input",
+}
 ```
