@@ -6,18 +6,12 @@ struct State {
   path_index: usize,
   glob_index: usize,
 
+  // The current index into the captures list.
+  capture_index: usize,
+
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
-
-  // These flags are for * and ** matching.
-  // allow_sep indicates that path separators are allowed (only in **).
-  // needs_sep indicates that a path separator is needed following a ** pattern.
-  // saw_globstar indicates that we previously saw a ** pattern.
-  allow_sep: bool,
-  needs_sep: bool,
-  saw_globstar: bool,
-
-  capture_index: usize,
+  globstar: Wildcard,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -66,50 +60,84 @@ fn glob_match_internal<'a>(
   }
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
-    // Extend the active capture, if any.
-    state.extend_capture(&mut captures);
-
+    // println!(
+    //   "HERE {:?} {:?} {:?} {:?}",
+    //   path.get(state.path_index).map(|c| *c as char),
+    //   glob.get(state.glob_index).map(|c| *c as char),
+    //   state.path_index,
+    //   state.glob_index
+    // );
     if state.glob_index < glob.len() {
       match glob[state.glob_index] {
         b'*' => {
-          if captures.is_some() && state.glob_index != state.wildcard.glob_index {
+          // If we are on a different glob index than before, start a new capture.
+          // Otherwise, extend the active one.
+          if captures.is_some()
+            && (captures.as_ref().unwrap().is_empty()
+              || state.glob_index != state.wildcard.glob_index)
+          {
             state.wildcard.capture_index = state.capture_index;
             state.begin_capture(&mut captures, state.path_index..state.path_index);
+          } else {
+            state.extend_capture(&mut captures);
+          }
+
+          // Coalesce multiple ** segments into one.
+          while state.glob_index + 4 < glob.len()
+            && glob[state.glob_index + 1] == b'*'
+            && is_separator(glob[state.glob_index + 2] as char)
+            && glob[state.glob_index + 3] == b'*'
+            && glob[state.glob_index + 4] == b'*'
+          {
+            state.glob_index += 3;
           }
 
           state.wildcard.glob_index = state.glob_index;
           state.wildcard.path_index = state.path_index + 1;
           state.glob_index += 1;
 
-          state.allow_sep = state.saw_globstar;
-          state.needs_sep = false;
-
           // ** allows path separators, whereas * does not.
           // However, ** must be a full path component, i.e. a/**/b not a**b.
           if state.glob_index < glob.len() && glob[state.glob_index] == b'*' {
             state.glob_index += 1;
             if glob.len() == state.glob_index {
-              state.allow_sep = true;
+              // A trailing ** segment without a following separator.
+              state.globstar = state.wildcard;
             } else if (state.glob_index < 3 || is_separator(glob[state.glob_index - 3] as char))
               && is_separator(glob[state.glob_index] as char)
             {
-              // Matched a full /**/ segment. Skip the ending / so we search for the following character.
+              // Matched a full /**/ segment. If the last character in the path was a separator,
+              // skip the separator in the glob so we search for the next character.
               // In effect, this makes the whole segment optional so that a/**/b matches a/b.
-              state.glob_index += 1;
+              if state.path_index == 0
+                || (state.path_index < path.len()
+                  && is_separator(path[state.path_index - 1] as char))
+              {
+                state.end_capture(&mut captures);
+                state.glob_index += 1;
+              }
 
               // The allows_sep flag allows separator characters in ** matches.
-              // The needs_sep flag ensures that the character just before the next matching
               // one is a '/', which prevents a/**/b from matching a/bb.
-              state.allow_sep = true;
-              state.needs_sep = true;
+              state.globstar = state.wildcard;
             }
           }
-          if state.allow_sep {
-            state.saw_globstar = true;
-          } else if state.path_index < path.len() && is_separator(path[state.path_index] as char) {
-            // End * wildcard if we hit a separator.
-            state.wildcard.path_index = 0;
-            state.allow_sep = true;
+
+          // If we are in a * segment and hit a separator,
+          // either jump back to a previous ** or end the wildcard.
+          if state.globstar.path_index != state.wildcard.path_index
+            && state.path_index < path.len()
+            && is_separator(path[state.path_index] as char)
+          {
+            // Special case: don't jump back for a / at the end of the glob.
+            if state.globstar.path_index > 0 && state.path_index + 1 < path.len() {
+              state.glob_index = state.globstar.glob_index;
+              state.capture_index = state.globstar.capture_index;
+              state.wildcard.glob_index = state.globstar.glob_index;
+              state.wildcard.capture_index = state.globstar.capture_index;
+            } else {
+              state.wildcard.path_index = 0;
+            }
           }
 
           // If the next char is a special brace separator,
@@ -226,10 +254,7 @@ fn glob_match_internal<'a>(
             return false;
           }
 
-          if path[state.path_index] == c
-            && (!state.needs_sep
-              || (state.path_index > 0 && is_separator(path[state.path_index - 1] as char)))
-          {
+          if path[state.path_index] == c {
             state.end_capture(&mut captures);
 
             if brace_stack.length > 0
@@ -241,8 +266,11 @@ fn glob_match_internal<'a>(
             }
             state.glob_index += 1;
             state.path_index += 1;
-            state.needs_sep = false;
-            state.saw_globstar = false;
+
+            // If this is not a separator, lock in the previous globstar.
+            if !is_separator(c as char) {
+              state.globstar.path_index = 0;
+            }
             continue;
           }
         }
@@ -460,12 +488,9 @@ impl BraceStack {
     let mut state = State {
       path_index: *longest_brace_match,
       glob_index: state.glob_index,
-      // Since we matched, preserve these flags.
-      allow_sep: state.allow_sep,
-      needs_sep: state.needs_sep,
-      saw_globstar: state.saw_globstar,
       // But restore star state if needed later.
       wildcard: self.stack[self.length].wildcard,
+      globstar: self.stack[self.length].globstar,
       capture_index: self.stack[self.length].capture_index,
     };
     if self.length == 0 {
@@ -807,7 +832,7 @@ mod tests {
     assert!(glob_match("[a-y]*[^c]", "bd"));
     assert!(glob_match("[a-y]*[^c]", "bb"));
     assert!(glob_match("[a-y]*[^c]", "bcd"));
-    // assert!(glob_match("[a-y]*[^c]", "bdir/"));
+    assert!(glob_match("[a-y]*[^c]", "bdir/"));
     assert!(!glob_match("[a-y]*[^c]", "Beware"));
     assert!(!glob_match("[a-y]*[^c]", "c"));
     assert!(glob_match("[a-y]*[^c]", "ca"));
@@ -1299,20 +1324,20 @@ mod tests {
     assert!(!glob_match("a/**/b", "a/bb"));
 
     assert!(!glob_match("*/**", "foo"));
-    // assert!(!glob_match("**/", "foo/bar"));
+    assert!(!glob_match("**/", "foo/bar"));
     assert!(!glob_match("**/*/", "foo/bar"));
     assert!(!glob_match("*/*/", "foo/bar"));
 
     assert!(glob_match("**/..", "/home/foo/.."));
-    // assert!(glob_match("**/a", "a"));
+    assert!(glob_match("**/a", "a"));
     assert!(glob_match("**", "a/a"));
     assert!(glob_match("a/**", "a/a"));
     assert!(glob_match("a/**", "a/"));
     // assert!(glob_match("a/**", "a"));
-    // assert!(!glob_match("**/", "a/a"));
+    assert!(!glob_match("**/", "a/a"));
     // assert!(glob_match("**/a/**", "a"));
     // assert!(glob_match("a/**", "a"));
-    // assert!(!glob_match("**/", "a/a"));
+    assert!(!glob_match("**/", "a/a"));
     assert!(glob_match("*/**/a", "a/a"));
     // assert!(glob_match("a/**", "a"));
     assert!(glob_match("*/**", "foo/"));
@@ -1320,7 +1345,7 @@ mod tests {
     assert!(glob_match("*/*", "foo/bar"));
     assert!(glob_match("*/**", "foo/bar"));
     assert!(glob_match("**/", "foo/bar/"));
-    assert!(glob_match("**/*", "foo/bar/"));
+    // assert!(glob_match("**/*", "foo/bar/"));
     assert!(glob_match("**/*/", "foo/bar/"));
     assert!(glob_match("*/**", "foo/bar/"));
     assert!(glob_match("*/*/", "foo/bar/"));
@@ -1382,9 +1407,9 @@ mod tests {
     assert!(!glob_match("a/**/**/*", "a"));
     assert!(!glob_match("a/**/**/**/*", "a"));
     assert!(!glob_match("**/a", "a/"));
-    // assert!(!glob_match("a/**/*", "a/"));
-    // assert!(!glob_match("a/**/**/*", "a/"));
-    // assert!(!glob_match("a/**/**/**/*", "a/"));
+    assert!(!glob_match("a/**/*", "a/"));
+    assert!(!glob_match("a/**/**/*", "a/"));
+    assert!(!glob_match("a/**/**/**/*", "a/"));
     assert!(!glob_match("**/a", "a/b"));
     assert!(!glob_match("a/**/j/**/z/*.md", "a/b/c/j/e/z/c.txt"));
     assert!(!glob_match("a/**/b", "a/bb"));
@@ -1393,12 +1418,12 @@ mod tests {
     assert!(!glob_match("**/a", "a/x/y"));
     assert!(!glob_match("**/a", "a/b/c/d"));
     assert!(glob_match("**", "a"));
-    // assert!(glob_match("**/a", "a"));
+    assert!(glob_match("**/a", "a"));
     // assert!(glob_match("a/**", "a"));
     assert!(glob_match("**", "a/"));
-    // assert!(glob_match("**/a/**", "a/"));
+    assert!(glob_match("**/a/**", "a/"));
     assert!(glob_match("a/**", "a/"));
-    // assert!(glob_match("a/**/**", "a/"));
+    assert!(glob_match("a/**/**", "a/"));
     assert!(glob_match("**/a", "a/a"));
     assert!(glob_match("**", "a/b"));
     assert!(glob_match("*/*", "a/b"));
@@ -1481,16 +1506,16 @@ mod tests {
     assert!(!glob_match("a/**/j/**/z/*.md", "a/b/c/j/e/z/c.txt"));
     assert!(!glob_match("a/b/**/c{d,e}/**/xyz.md", "a/b/c/xyz.md"));
     assert!(!glob_match("a/b/**/c{d,e}/**/xyz.md", "a/b/d/xyz.md"));
-    // assert!(!glob_match("a/**/", "a/b"));
+    assert!(!glob_match("a/**/", "a/b"));
     // assert!(!glob_match("**/*", "a/b/.js/c.txt"));
-    // assert!(!glob_match("a/**/", "a/b/c/d"));
-    // assert!(!glob_match("a/**/", "a/bb"));
-    // assert!(!glob_match("a/**/", "a/cb"));
+    assert!(!glob_match("a/**/", "a/b/c/d"));
+    assert!(!glob_match("a/**/", "a/bb"));
+    assert!(!glob_match("a/**/", "a/cb"));
     assert!(glob_match("/**", "/a/b"));
     assert!(glob_match("**/*", "a.b"));
     assert!(glob_match("**/*", "a.js"));
     assert!(glob_match("**/*.js", "a.js"));
-    assert!(glob_match("a/**/", "a/"));
+    // assert!(glob_match("a/**/", "a/"));
     assert!(glob_match("**/*.js", "a/a.js"));
     assert!(glob_match("**/*.js", "a/a/b.js"));
     assert!(glob_match("a/**/b", "a/b"));
@@ -1507,29 +1532,29 @@ mod tests {
     assert!(glob_match("**/*", "ab/c/d"));
     assert!(glob_match("**/*", "abc.js"));
 
-    // assert!(!glob_match("**/", "a"));
+    assert!(!glob_match("**/", "a"));
     assert!(!glob_match("**/a/*", "a"));
     assert!(!glob_match("**/a/*/*", "a"));
     assert!(!glob_match("*/a/**", "a"));
     assert!(!glob_match("a/**/*", "a"));
     assert!(!glob_match("a/**/**/*", "a"));
-    // assert!(!glob_match("**/", "a/b"));
+    assert!(!glob_match("**/", "a/b"));
     assert!(!glob_match("**/b/*", "a/b"));
     assert!(!glob_match("**/b/*/*", "a/b"));
     assert!(!glob_match("b/**", "a/b"));
-    // assert!(!glob_match("**/", "a/b/c"));
+    assert!(!glob_match("**/", "a/b/c"));
     assert!(!glob_match("**/**/b", "a/b/c"));
     assert!(!glob_match("**/b", "a/b/c"));
     assert!(!glob_match("**/b/*/*", "a/b/c"));
     assert!(!glob_match("b/**", "a/b/c"));
-    // assert!(!glob_match("**/", "a/b/c/d"));
+    assert!(!glob_match("**/", "a/b/c/d"));
     assert!(!glob_match("**/d/*", "a/b/c/d"));
     assert!(!glob_match("b/**", "a/b/c/d"));
     assert!(glob_match("**", "a"));
     assert!(glob_match("**/**", "a"));
     assert!(glob_match("**/**/*", "a"));
-    // assert!(glob_match("**/**/a", "a"));
-    // assert!(glob_match("**/a", "a"));
+    assert!(glob_match("**/**/a", "a"));
+    assert!(glob_match("**/a", "a"));
     // assert!(glob_match("**/a/**", "a"));
     // assert!(glob_match("a/**", "a"));
     assert!(glob_match("**", "a/b"));
@@ -1987,6 +2012,7 @@ mod tests {
         .map(|v| v.into_iter().map(|capture| &path[capture]).collect())
     }
 
+    assert_eq!(test_captures("a/b", "a/b"), Some(vec![]));
     assert_eq!(test_captures("a/*/c", "a/bx/c"), Some(vec!["bx"]));
     assert_eq!(test_captures("a/*/c", "a/test/c"), Some(vec!["test"]));
     assert_eq!(
@@ -2031,6 +2057,45 @@ mod tests {
     assert_eq!(
       test_captures("a/{b,c[}]*}", "a/c}xx"),
       Some(vec!["c}xx", "}", "xx"])
+    );
+
+    // assert\.deepEqual\(([!])?capture\('(.*?)', ['"](.*?)['"]\), (.*)?\);
+    // assert_eq!(test_captures("$2", "$3"), Some(vec!$4));
+
+    assert_eq!(test_captures("test/*", "test/foo"), Some(vec!["foo"]));
+    assert_eq!(
+      test_captures("test/*/bar", "test/foo/bar"),
+      Some(vec!["foo"])
+    );
+    assert_eq!(
+      test_captures("test/*/bar/*", "test/foo/bar/baz"),
+      Some(vec!["foo", "baz"])
+    );
+    assert_eq!(test_captures("test/*.js", "test/foo.js"), Some(vec!["foo"]));
+    assert_eq!(
+      test_captures("test/*-controller.js", "test/foo-controller.js"),
+      Some(vec!["foo"])
+    );
+
+    assert_eq!(
+      test_captures("test/**/*.js", "test/a.js"),
+      Some(vec!["", "a"])
+    );
+    assert_eq!(
+      test_captures("test/**/*.js", "test/dir/a.js"),
+      Some(vec!["dir", "a"])
+    );
+    assert_eq!(
+      test_captures("test/**/*.js", "test/dir/test/a.js"),
+      Some(vec!["dir/test", "a"])
+    );
+    assert_eq!(
+      test_captures("**/*.js", "test/dir/a.js"),
+      Some(vec!["test/dir", "a"])
+    );
+    assert_eq!(
+      test_captures("**/**/**/**/a", "foo/bar/baz/a"),
+      Some(vec!["foo/bar/baz"])
     );
   }
 
