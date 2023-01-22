@@ -70,6 +70,9 @@ fn glob_match_internal<'a>(
     if state.glob_index < glob.len() {
       match glob[state.glob_index] {
         b'*' => {
+          // Coalesce multiple ** segments into one.
+          state.skip_globstars(glob);
+
           // If we are on a different glob index than before, start a new capture.
           // Otherwise, extend the active one.
           if captures.is_some()
@@ -80,16 +83,6 @@ fn glob_match_internal<'a>(
             state.begin_capture(&mut captures, state.path_index..state.path_index);
           } else {
             state.extend_capture(&mut captures);
-          }
-
-          // Coalesce multiple ** segments into one.
-          while state.glob_index + 4 < glob.len()
-            && glob[state.glob_index + 1] == b'*'
-            && is_separator(glob[state.glob_index + 2] as char)
-            && glob[state.glob_index + 3] == b'*'
-            && glob[state.glob_index + 4] == b'*'
-          {
-            state.glob_index += 3;
           }
 
           state.wildcard.glob_index = state.glob_index;
@@ -429,6 +422,12 @@ impl State {
             }
             capture_index += 1;
           }
+          if c == b'*' {
+            self.skip_globstars(glob);
+            if self.glob_index < glob.len() && glob[self.glob_index + 1] == b'*' {
+              self.glob_index += 1;
+            }
+          }
         }
         b']' => in_brackets = false,
         b'\\' => {
@@ -444,6 +443,19 @@ impl State {
     }
 
     BraceState::EndBrace
+  }
+
+  #[inline(always)]
+  fn skip_globstars(&mut self, glob: &[u8]) {
+    // Coalesce multiple ** segments into one.
+    while self.glob_index + 4 < glob.len()
+      && glob[self.glob_index + 1] == b'*'
+      && is_separator(glob[self.glob_index + 2] as char)
+      && glob[self.glob_index + 3] == b'*'
+      && glob[self.glob_index + 4] == b'*'
+    {
+      self.glob_index += 3;
+    }
   }
 }
 
@@ -2007,7 +2019,7 @@ mod tests {
   #[test]
   fn captures() {
     fn test_captures<'a>(glob: &str, path: &'a str) -> Option<Vec<&'a str>> {
-      println!("{} {:?}", glob, glob_match_with_captures(glob, path));
+      // println!("{} {:?}", glob, glob_match_with_captures(glob, path));
       glob_match_with_captures(glob, path)
         .map(|v| v.into_iter().map(|capture| &path[capture]).collect())
     }
@@ -2096,6 +2108,26 @@ mod tests {
     assert_eq!(
       test_captures("**/**/**/**/a", "foo/bar/baz/a"),
       Some(vec!["foo/bar/baz"])
+    );
+    assert_eq!(
+      test_captures("a/{b/**/y,c/**/d}", "a/b/y"),
+      Some(vec!["b/y", "", ""])
+    );
+    assert_eq!(
+      test_captures("a/{b/**/y,c/**/d}", "a/b/x/x/y"),
+      Some(vec!["b/x/x/y", "x/x", ""])
+    );
+    assert_eq!(
+      test_captures("a/{b/**/y,c/**/d}", "a/c/x/x/d"),
+      Some(vec!["c/x/x/d", "", "x/x"])
+    );
+    assert_eq!(
+      test_captures("a/{b/**/**/y,c/**/**/d}", "a/b/x/x/x/x/x/y"),
+      Some(vec!["b/x/x/x/x/x/y", "x/x/x/x/x", ""])
+    );
+    assert_eq!(
+      test_captures("a/{b/**/**/y,c/**/**/d}", "a/c/x/x/x/x/x/d"),
+      Some(vec!["c/x/x/x/x/x/d", "", "x/x/x/x/x"])
     );
   }
 
