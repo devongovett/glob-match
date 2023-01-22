@@ -16,9 +16,10 @@ struct State {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Wildcard {
-  glob_index: usize,
-  path_index: usize,
-  capture_index: usize,
+  // Using u32 rather than usize for these results in 10% faster performance.
+  glob_index: u32,
+  path_index: u32,
+  capture_index: u32,
 }
 
 type Capture = Range<usize>;
@@ -60,44 +61,40 @@ fn glob_match_internal<'a>(
   }
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
-    // println!(
-    //   "HERE {:?} {:?} {:?} {:?}",
-    //   path.get(state.path_index).map(|c| *c as char),
-    //   glob.get(state.glob_index).map(|c| *c as char),
-    //   state.path_index,
-    //   state.glob_index
-    // );
     if state.glob_index < glob.len() {
       match glob[state.glob_index] {
         b'*' => {
-          // Coalesce multiple ** segments into one.
-          state.skip_globstars(glob);
+          let is_globstar = state.glob_index + 1 < glob.len() && glob[state.glob_index + 1] == b'*';
+          if is_globstar {
+            // Coalesce multiple ** segments into one.
+            state.glob_index = skip_globstars(glob, state.glob_index + 2) - 2;
+          }
 
           // If we are on a different glob index than before, start a new capture.
           // Otherwise, extend the active one.
           if captures.is_some()
             && (captures.as_ref().unwrap().is_empty()
-              || state.glob_index != state.wildcard.glob_index)
+              || state.glob_index != state.wildcard.glob_index as usize)
           {
-            state.wildcard.capture_index = state.capture_index;
+            state.wildcard.capture_index = state.capture_index as u32;
             state.begin_capture(&mut captures, state.path_index..state.path_index);
           } else {
             state.extend_capture(&mut captures);
           }
 
-          state.wildcard.glob_index = state.glob_index;
-          state.wildcard.path_index = state.path_index + 1;
-          state.glob_index += 1;
+          state.wildcard.glob_index = state.glob_index as u32;
+          state.wildcard.path_index = state.path_index as u32 + 1;
 
           // ** allows path separators, whereas * does not.
           // However, ** must be a full path component, i.e. a/**/b not a**b.
-          if state.glob_index < glob.len() && glob[state.glob_index] == b'*' {
-            state.glob_index += 1;
+          if is_globstar {
+            state.glob_index += 2;
+
             if glob.len() == state.glob_index {
               // A trailing ** segment without a following separator.
               state.globstar = state.wildcard;
-            } else if (state.glob_index < 3 || is_separator(glob[state.glob_index - 3] as char))
-              && is_separator(glob[state.glob_index] as char)
+            } else if (state.glob_index < 3 || glob[state.glob_index - 3] == b'/')
+              && glob[state.glob_index] == b'/'
             {
               // Matched a full /**/ segment. If the last character in the path was a separator,
               // skip the separator in the glob so we search for the next character.
@@ -114,6 +111,8 @@ fn glob_match_internal<'a>(
               // one is a '/', which prevents a/**/b from matching a/bb.
               state.globstar = state.wildcard;
             }
+          } else {
+            state.glob_index += 1;
           }
 
           // If we are in a * segment and hit a separator,
@@ -124,8 +123,8 @@ fn glob_match_internal<'a>(
           {
             // Special case: don't jump back for a / at the end of the glob.
             if state.globstar.path_index > 0 && state.path_index + 1 < path.len() {
-              state.glob_index = state.globstar.glob_index;
-              state.capture_index = state.globstar.capture_index;
+              state.glob_index = state.globstar.glob_index as usize;
+              state.capture_index = state.globstar.capture_index as usize;
               state.wildcard.glob_index = state.globstar.glob_index;
               state.wildcard.capture_index = state.globstar.capture_index;
             } else {
@@ -238,6 +237,7 @@ fn glob_match_internal<'a>(
           state.path_index = brace_stack.stack[brace_stack.length - 1].path_index;
           state.glob_index += 1;
           state.wildcard = Wildcard::default();
+          state.globstar = Wildcard::default();
           continue;
         }
         mut c if state.path_index < path.len() => {
@@ -252,6 +252,7 @@ fn glob_match_internal<'a>(
 
             if brace_stack.length > 0
               && state.wildcard.path_index > 0
+              && state.glob_index > 0
               && glob[state.glob_index - 1] == b'}'
             {
               longest_brace_match = state.path_index;
@@ -261,7 +262,7 @@ fn glob_match_internal<'a>(
             state.path_index += 1;
 
             // If this is not a separator, lock in the previous globstar.
-            if !is_separator(c as char) {
+            if c != b'/' {
               state.globstar.path_index = 0;
             }
             continue;
@@ -272,7 +273,7 @@ fn glob_match_internal<'a>(
     }
 
     // If we didn't match, restore state to the previous star pattern.
-    if state.wildcard.path_index > 0 && state.wildcard.path_index <= path.len() {
+    if state.wildcard.path_index > 0 && state.wildcard.path_index as usize <= path.len() {
       state.backtrack();
       continue;
     }
@@ -297,7 +298,7 @@ fn glob_match_internal<'a>(
         // Didn't match. Restore state, and check if we need to jump back to a star pattern.
         brace_stack.length -= 1;
         state = brace_stack.stack[brace_stack.length];
-        if state.wildcard.path_index > 0 && state.wildcard.path_index <= path.len() {
+        if state.wildcard.path_index > 0 && state.wildcard.path_index as usize <= path.len() {
           state.backtrack();
           continue;
         }
@@ -350,9 +351,9 @@ enum BraceState {
 impl State {
   #[inline(always)]
   fn backtrack(&mut self) {
-    self.glob_index = self.wildcard.glob_index;
-    self.path_index = self.wildcard.path_index;
-    self.capture_index = self.wildcard.capture_index;
+    self.glob_index = self.wildcard.glob_index as usize;
+    self.path_index = self.wildcard.path_index as usize;
+    self.capture_index = self.wildcard.capture_index as usize;
   }
 
   #[inline(always)]
@@ -423,8 +424,8 @@ impl State {
             capture_index += 1;
           }
           if c == b'*' {
-            self.skip_globstars(glob);
-            if self.glob_index < glob.len() && glob[self.glob_index + 1] == b'*' {
+            if self.glob_index + 1 < glob.len() && glob[self.glob_index + 1] == b'*' {
+              self.glob_index = skip_globstars(glob, self.glob_index + 2) - 2;
               self.glob_index += 1;
             }
           }
@@ -444,19 +445,17 @@ impl State {
 
     BraceState::EndBrace
   }
+}
 
-  #[inline(always)]
-  fn skip_globstars(&mut self, glob: &[u8]) {
-    // Coalesce multiple ** segments into one.
-    while self.glob_index + 4 < glob.len()
-      && glob[self.glob_index + 1] == b'*'
-      && is_separator(glob[self.glob_index + 2] as char)
-      && glob[self.glob_index + 3] == b'*'
-      && glob[self.glob_index + 4] == b'*'
-    {
-      self.glob_index += 3;
-    }
+#[inline(always)]
+fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
+  // Coalesce multiple ** segments into one.
+  while glob_index + 3 <= glob.len()
+    && unsafe { glob.get_unchecked(glob_index..glob_index + 3) } == b"/**"
+  {
+    glob_index += 3;
   }
+  glob_index
 }
 
 struct BraceStack {
@@ -2019,7 +2018,6 @@ mod tests {
   #[test]
   fn captures() {
     fn test_captures<'a>(glob: &str, path: &'a str) -> Option<Vec<&'a str>> {
-      // println!("{} {:?}", glob, glob_match_with_captures(glob, path));
       glob_match_with_captures(glob, path)
         .map(|v| v.into_iter().map(|capture| &path[capture]).collect())
     }
