@@ -46,7 +46,7 @@ assert_eq!(result, vec!["path", "a", "to/the"]);
 ```
 globset                 time:   [35.176 µs 35.200 µs 35.235 µs]
 glob                    time:   [339.77 ns 339.94 ns 340.13 ns]
-glob_match              time:   [163.31 ns 163.34 ns 163.38 ns]
+glob_match              time:   [179.76 ns 179.96 ns 180.27 ns]
 ```
 
 ## Fuzzing
