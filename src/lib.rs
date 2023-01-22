@@ -298,6 +298,9 @@ fn glob_match_internal<'a>(
         // Didn't match. Restore state, and check if we need to jump back to a star pattern.
         brace_stack.length -= 1;
         state = brace_stack.stack[brace_stack.length];
+        if let Some(captures) = &mut captures {
+          captures.truncate(state.capture_index);
+        }
         if state.wildcard.path_index > 0 && state.wildcard.path_index as usize <= path.len() {
           state.backtrack();
           continue;
@@ -2126,6 +2129,13 @@ mod tests {
     assert_eq!(
       test_captures("a/{b/**/**/y,c/**/**/d}", "a/c/x/x/x/x/x/d"),
       Some(vec!["c/x/x/x/x/x/d", "", "x/x/x/x/x"])
+    );
+    assert_eq!(
+      test_captures(
+        "some/**/{a,b,c}/**/needle.txt",
+        "some/path/a/to/the/needle.txt"
+      ),
+      Some(vec!["path", "a", "to/the"])
     );
   }
 

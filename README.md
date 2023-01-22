@@ -2,10 +2,11 @@
 
 An extremely fast glob matching library with support for wildcards, character classes, and brace expansion.
 
-- Linear time matching. No exponential backtracking.
-- Zero allocations.
-- No regex compilation. Matching occurs on the glob pattern in place.
-- Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
+* Linear time matching. No exponential backtracking.
+* Zero allocations.
+* No regex compilation. Matching occurs on the glob pattern in place.
+* Support for capturing matched ranges of wildcards.
+* Thousands of tests based on Bash and [micromatch](https://github.com/micromatch/micromatch).
 
 ## Example
 
@@ -13,6 +14,19 @@ An extremely fast glob matching library with support for wildcards, character cl
 use glob_match::glob_match;
 
 assert!(glob_match("some/**/{a,b,c}/**/needle.txt", "some/path/a/to/the/needle.txt"));
+```
+
+Wildcard values can also be captured using the `glob_match_with_captures` function. This returns a `Vec` containing ranges within the path string that matched dynamic parts of the glob pattern. You can use these ranges to get slices from the original path string.
+
+```rust
+use glob_match::glob_match_with_captures;
+
+let glob = "some/**/{a,b,c}/**/needle.txt";
+let path = "some/path/a/to/the/needle.txt";
+let result = glob_match_with_captures(glob, path)
+  .map(|v| v.into_iter().map(|capture| &path[capture]).collect());
+
+assert_eq!(result, vec!["path", "a", "to/the"]);
 ```
 
 ## Syntax
