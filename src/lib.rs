@@ -50,7 +50,6 @@ fn glob_match_internal<'a>(
   // Store the state when we see an opening '{' brace in a stack.
   // Up to 10 nested braces are supported.
   let mut brace_stack = BraceStack::default();
-  let mut longest_brace_match = 0;
 
   // First, check if the pattern is negated with a leading '!' character.
   // Multiple negations can occur.
@@ -166,11 +165,9 @@ fn glob_match_internal<'a>(
           }
 
           // Try each range.
-          let start = state.glob_index;
+          let mut first = true;
           let mut is_match = false;
-          while state.glob_index < glob.len()
-            && (state.glob_index == start || glob[state.glob_index] != b']')
-          {
+          while state.glob_index < glob.len() && (first || glob[state.glob_index] != b']') {
             let mut low = glob[state.glob_index];
             if !unescape(&mut low, glob, &mut state.glob_index) {
               // Invalid pattern!
@@ -198,8 +195,9 @@ fn glob_match_internal<'a>(
             if low <= c && c <= high {
               is_match = true;
             }
+            first = false;
           }
-          if state.glob_index >= glob.len() || glob[state.glob_index] != b']' {
+          if state.glob_index >= glob.len() {
             // invalid pattern!
             return false;
           }
@@ -211,7 +209,7 @@ fn glob_match_internal<'a>(
           }
         }
         b'{' if state.path_index < path.len() => {
-          if brace_stack.length >= brace_stack.stack.len() {
+          if brace_stack.length as usize >= brace_stack.stack.len() {
             // Invalid pattern! Too many nested braces.
             return false;
           }
@@ -225,16 +223,18 @@ fn glob_match_internal<'a>(
         }
         b'}' if brace_stack.length > 0 => {
           // If we hit the end of the braces, we matched the last option.
-          longest_brace_match = longest_brace_match.max(state.path_index);
+          brace_stack.longest_brace_match =
+            brace_stack.longest_brace_match.max(state.path_index as u32);
           state.glob_index += 1;
-          state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
+          state = brace_stack.pop(&state, &mut captures);
           continue;
         }
         b',' if brace_stack.length > 0 => {
           // If we hit a comma, we matched one of the options!
           // But we still need to check the others in case there is a longer match.
-          longest_brace_match = longest_brace_match.max(state.path_index);
-          state.path_index = brace_stack.stack[brace_stack.length - 1].path_index;
+          brace_stack.longest_brace_match =
+            brace_stack.longest_brace_match.max(state.path_index as u32);
+          state.path_index = brace_stack.last().path_index;
           state.glob_index += 1;
           state.wildcard = Wildcard::default();
           state.globstar = Wildcard::default();
@@ -250,13 +250,10 @@ fn glob_match_internal<'a>(
           if path[state.path_index] == c {
             state.end_capture(&mut captures);
 
-            if brace_stack.length > 0
-              && state.wildcard.path_index > 0
-              && state.glob_index > 0
-              && glob[state.glob_index - 1] == b'}'
+            if brace_stack.length > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}'
             {
-              longest_brace_match = state.path_index;
-              state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
+              brace_stack.longest_brace_match = state.path_index as u32;
+              state = brace_stack.pop(&state, &mut captures);
             }
             state.glob_index += 1;
             state.path_index += 1;
@@ -283,7 +280,7 @@ fn glob_match_internal<'a>(
       match state.skip_braces(glob, &mut captures, true) {
         BraceState::Invalid => return false,
         BraceState::Comma => {
-          state.path_index = brace_stack.stack[brace_stack.length - 1].path_index;
+          state.path_index = brace_stack.last().path_index;
           continue;
         }
         BraceState::EndBrace => {}
@@ -291,13 +288,13 @@ fn glob_match_internal<'a>(
 
       // Hit the end. Pop the stack.
       // If we matched a previous option, use that.
-      if longest_brace_match > 0 {
-        state = brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
+      if brace_stack.longest_brace_match > 0 {
+        state = brace_stack.pop(&state, &mut captures);
         continue;
       } else {
         // Didn't match. Restore state, and check if we need to jump back to a star pattern.
+        state = *brace_stack.last();
         brace_stack.length -= 1;
-        state = brace_stack.stack[brace_stack.length];
         if let Some(captures) = &mut captures {
           captures.truncate(state.capture_index);
         }
@@ -311,14 +308,9 @@ fn glob_match_internal<'a>(
     return negated;
   }
 
-  if brace_stack.length > 0
-    && state.wildcard.path_index > 0
-    && state.glob_index > 0
-    && state.glob_index - 1 < glob.len()
-    && glob[state.glob_index - 1] == b'}'
-  {
-    longest_brace_match = state.path_index;
-    brace_stack.pop(&state, &mut longest_brace_match, &mut captures);
+  if brace_stack.length > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}' {
+    brace_stack.longest_brace_match = state.path_index as u32;
+    brace_stack.pop(&state, &mut captures);
   }
 
   !negated
@@ -395,7 +387,6 @@ impl State {
     self.capture_index += 1;
   }
 
-  #[inline(always)]
   fn skip_braces(
     &mut self,
     glob: &[u8],
@@ -463,7 +454,8 @@ fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
 
 struct BraceStack {
   stack: [State; 10],
-  length: usize,
+  length: u32,
+  longest_brace_match: u32,
 }
 
 impl Default for BraceStack {
@@ -473,6 +465,7 @@ impl Default for BraceStack {
     BraceStack {
       stack: [State::default(); 10],
       length: 0,
+      longest_brace_match: 0,
     }
   }
 }
@@ -481,7 +474,7 @@ impl BraceStack {
   #[inline(always)]
   fn push(&mut self, state: &State) -> State {
     // Push old state to the stack, and reset current state.
-    self.stack[self.length] = *state;
+    self.stack[self.length as usize] = *state;
     self.length += 1;
     State {
       path_index: state.path_index,
@@ -492,23 +485,18 @@ impl BraceStack {
   }
 
   #[inline(always)]
-  fn pop(
-    &mut self,
-    state: &State,
-    longest_brace_match: &mut usize,
-    captures: &mut Option<&mut Vec<Capture>>,
-  ) -> State {
+  fn pop(&mut self, state: &State, captures: &mut Option<&mut Vec<Capture>>) -> State {
     self.length -= 1;
     let mut state = State {
-      path_index: *longest_brace_match,
+      path_index: self.longest_brace_match as usize,
       glob_index: state.glob_index,
       // But restore star state if needed later.
-      wildcard: self.stack[self.length].wildcard,
-      globstar: self.stack[self.length].globstar,
-      capture_index: self.stack[self.length].capture_index,
+      wildcard: self.stack[self.length as usize].wildcard,
+      globstar: self.stack[self.length as usize].globstar,
+      capture_index: self.stack[self.length as usize].capture_index,
     };
     if self.length == 0 {
-      *longest_brace_match = 0;
+      self.longest_brace_match = 0;
     }
     state.extend_capture(captures);
     if let Some(captures) = captures {
@@ -516,6 +504,11 @@ impl BraceStack {
     }
 
     state
+  }
+
+  #[inline(always)]
+  fn last(&self) -> &State {
+    &self.stack[self.length as usize - 1]
   }
 }
 
