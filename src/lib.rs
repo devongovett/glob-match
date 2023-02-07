@@ -247,7 +247,13 @@ fn glob_match_internal<'a>(
             return false;
           }
 
-          if path[state.path_index] == c {
+          let is_match = if c == b'/' {
+            is_separator(path[state.path_index] as char)
+          } else {
+            path[state.path_index] == c
+          };
+
+          if is_match {
             state.end_capture(&mut captures);
 
             if brace_stack.length > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}'
