@@ -36,14 +36,14 @@ pub fn glob_match_with_captures<'a>(glob: &str, path: &'a str) -> Option<Vec<Cap
   None
 }
 
+/// This algorithm is based on https://research.swtch.com/glob
 fn glob_match_internal<'a>(
-  glob: &str,
-  path: &'a str,
+  glob_str: &str,
+  path_str: &'a str,
   mut captures: Option<&mut Vec<Capture>>,
 ) -> bool {
-  // This algorithm is based on https://research.swtch.com/glob
-  let glob = glob.as_bytes();
-  let path = path.as_bytes();
+  let glob = glob_str.as_bytes();
+  let path = path_str.as_bytes();
 
   let mut state = State::default();
 
@@ -147,15 +147,21 @@ fn glob_match_internal<'a>(
         }
         b'?' if state.path_index < path.len() => {
           if !is_separator(path[state.path_index] as char) {
-            state.add_char_capture(&mut captures);
             state.glob_index += 1;
-            state.path_index += 1;
+            let cap = match get_char_slice(path_str, path, &mut state.path_index) {
+              Some(c) => c,
+              None => return false,
+            };
+            state.add_char_capture(&mut captures, cap);
             continue;
           }
         }
         b'[' if state.path_index < path.len() => {
           state.glob_index += 1;
-          let c = path[state.path_index];
+          let c = match get_char_slice(path_str, path, &mut state.path_index) {
+            Some(c) => c,
+            None => return false,
+          };
 
           // Check if the character class is negated.
           let mut negated = false;
@@ -168,12 +174,10 @@ fn glob_match_internal<'a>(
           let mut first = true;
           let mut is_match = false;
           while state.glob_index < glob.len() && (first || glob[state.glob_index] != b']') {
-            let mut low = glob[state.glob_index];
-            if !unescape(&mut low, glob, &mut state.glob_index) {
-              // Invalid pattern!
-              return false;
-            }
-            state.glob_index += 1;
+            let low = match get_char_slice(glob_str, glob, &mut state.glob_index) {
+              Some(c) => c,
+              None => return false,
+            };
 
             // If there is a - and the following character is not ], read the range end character.
             let high = if state.glob_index + 1 < glob.len()
@@ -181,18 +185,15 @@ fn glob_match_internal<'a>(
               && glob[state.glob_index + 1] != b']'
             {
               state.glob_index += 1;
-              let mut high = glob[state.glob_index];
-              if !unescape(&mut high, glob, &mut state.glob_index) {
-                // Invalid pattern!
-                return false;
+              match get_char_slice(glob_str, glob, &mut state.glob_index) {
+                Some(c) => c,
+                None => return false,
               }
-              state.glob_index += 1;
-              high
             } else {
               low
             };
 
-            if low <= c && c <= high {
+            if between(low, high, c) {
               is_match = true;
             }
             first = false;
@@ -203,8 +204,7 @@ fn glob_match_internal<'a>(
           }
           state.glob_index += 1;
           if is_match != negated {
-            state.add_char_capture(&mut captures);
-            state.path_index += 1;
+            state.add_char_capture(&mut captures, c);
             continue;
           }
         }
@@ -322,6 +322,55 @@ fn glob_match_internal<'a>(
   !negated
 }
 
+/// gets a slice to a unicode grapheme at the given index
+/// respecting potential escaped characters
+#[cfg(feature = "unic-segment")]
+fn get_char_slice<'a>(glob: &str, glob_bytes: &'a [u8], index: &mut usize) -> Option<&'a [u8]> {
+  use unic_segment::GraphemeCursor;
+  let mut cur = GraphemeCursor::new(*index, glob.len());
+  let end = cur.next_boundary(glob, 0).unwrap().unwrap();
+  // if end - low = 1 {}
+  match &glob_bytes[*index..end] {
+    [b'\\'] => {
+      if unescape(&mut 92, glob_bytes, index) {
+        get_char_slice(glob, glob_bytes, index)
+      } else {
+        None
+      }
+    }
+    slice => {
+      *index += slice.len();
+      Some(slice)
+    }
+  }
+}
+
+#[cfg(not(feature = "unic-segment"))]
+fn get_char_slice(_: &str, glob: &[u8], index: &mut usize) -> Option<u8> {
+  let mut high = glob[*index];
+  if !unescape(&mut high, glob, index) {
+    // Invalid pattern!
+    return None;
+  }
+  *index += 1;
+  Some(high)
+}
+
+/// checks if the given slice is between low and high by comparing each byte
+#[cfg(feature = "unic-segment")]
+fn between(low: &[u8], high: &[u8], slice: &[u8]) -> bool {
+  if low.len() != high.len() || low.len() != slice.len() {
+    false
+  } else {
+    (0..low.len()).all(|i| low[i] <= slice[i] && slice[i] <= high[i])
+  }
+}
+
+#[cfg(not(feature = "unic-segment"))]
+fn between(low: u8, high: u8, slice: u8) -> bool {
+  low <= slice && slice <= high
+}
+
 #[inline(always)]
 fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
   if *c == b'\\' {
@@ -386,10 +435,21 @@ impl State {
     }
   }
 
+  /// Adds a capture for a slice of characters. It is expected that path_index has already been
+  /// incremented by the length of the slice.
   #[inline(always)]
-  fn add_char_capture(&mut self, captures: &mut Option<&mut Vec<Capture>>) {
+  #[cfg(feature = "unic-segment")]
+  fn add_char_capture(&mut self, captures: &mut Option<&mut Vec<Capture>>, slice: &[u8]) {
     self.end_capture(captures);
-    self.begin_capture(captures, self.path_index..self.path_index + 1);
+    self.begin_capture(captures, self.path_index - slice.len()..self.path_index);
+    self.capture_index += 1;
+  }
+
+  #[inline(always)]
+  #[cfg(not(feature = "unic-segment"))]
+  fn add_char_capture(&mut self, captures: &mut Option<&mut Vec<Capture>>, _: u8) {
+    self.end_capture(captures);
+    self.begin_capture(captures, self.path_index - 1..self.path_index);
     self.capture_index += 1;
   }
 
@@ -522,6 +582,71 @@ impl BraceStack {
 mod tests {
   use super::*;
   use test_case::test_case;
+
+  #[test_case(&b"\\n"[..], 10)] // new line
+  #[test_case(&b"\\a"[..], 97)]
+  #[test_case(&b"\\\xf0\x9f\xa7\xa6"[..], 0xf0)]
+  fn unescape(bytes: &[u8], expected: u8) {
+    let mut curr_byte = bytes[0];
+    super::unescape(&mut curr_byte, bytes, &mut 0);
+    assert_eq!(curr_byte, expected)
+  }
+
+  #[cfg(feature = "unic-segment")]
+  #[test_case("[\\!]", 1, Some(&[b'!']), 3)]
+  fn get_char_slice(glob: &str, mut index: usize, expected: Option<&[u8]>, expected_index: usize) {
+    let actual = super::get_char_slice(glob, glob.as_bytes(), &mut index);
+    assert_eq!(actual, expected);
+    assert_eq!(index, expected_index);
+  }
+
+  #[cfg(feature = "unic-segment")]
+  #[test_case("[😀-😆]", "😁" ; "range")]
+  #[test_case("a[!c]b", "a🌟b" ; "negated character class")]
+  #[test_case("a[^c]b", "a🌟b" ; "negated character class 2")]
+  #[test_case("a[^🔥]b", "a🌟b";  "negated character class 3")]
+  #[test_case("a[^🌟]b", "abb" ; "negated character class unicode")]
+  #[test_case("a🌟b", "a🌟b" ; "unicode")]
+  #[test_case("a?", "a🌟" ; "question mark")]
+  #[test_case("á*", "ábc" ; "single unicode char with wildcard")]
+  #[test_case("*ü*", "düf" ; "wildcard with unicode char and wildcard")]
+  #[test_case("?ñ?", "añb" ; "wildcard with unicode char and wildcard 2")]
+  #[test_case("[á-é]", "é" ; "unicode char range match")]
+  #[test_case("[^á-é]", "f" ; "unicode char range negation match")]
+  #[test_case("ü{a,b}", "üa" ; "unicode char with curly braces")]
+  #[test_case("ü{a,b,*}", "üab" ; "unicode char with curly braces wildcard")]
+  #[test_case("a*ő", "aő" ; "latin letter with wildcard and unicode char")]
+  #[test_case("ë?z", "ëöz" ; "unicode char wildcard unicode char")]
+  #[test_case("j[ǽ-ǿ]", "jǿ" ; "latin letter with unicode range match")]
+  #[test_case("😀*", "😀😃😄" ; "emoji with wildcard")]
+  #[test_case("*😂*", "🤣😂😅" ; "wildcard with emoji and wildcard")]
+  #[test_case("?😊?", "😇😊😍" ; "wildcard with emoji and wildcard 2")]
+  #[test_case("[😎-😔]", "😔" ; "emoji range match")]
+  #[test_case("[^😖-😞]", "😟" ; "emoji range negation match")]
+  #[test_case("😠{a,b}", "😠a" ; "emoji with curly braces")]
+  #[test_case("😡{a,b,*}", "😡ab" ; "emoji with curly braces wildcard")]
+  #[test_case("a*😢", "a😢" ; "latin letter with wildcard and emoji")]
+  #[test_case("😥?z", "😥😦z" ; "emoji wildcard emoji")]
+  #[test_case("j[😧-😪]", "j😪" ; "latin letter with emoji range match")]
+  #[test_case("👨‍👩‍👦‍👦*", "👨‍👩‍👦‍👦👨‍👩‍👦‍👦" ; "family emoji with wildcard")]
+  #[test_case("*🇬🇧*", "🇬🇧🇬🇧" ; "UK flag with wildcard")]
+  #[test_case("?🇳🇴?", "🇳🇴🇳🇴🇳🇴" ; "Norway flag with wildcard")]
+  #[test_case("[👨‍👩‍👦‍👦-👩‍👩‍👦‍👦]", "👨‍👩‍👦‍👦" ; "family emoji range match")]
+  #[test_case("[^🇮🇪-🇬🇧]", "🇫🇷" ; "flag emoji range negation match")]
+  #[test_case("👨‍👩‍👦‍👦{a,b}", "👨‍👩‍👦‍👦a" ; "family emoji with curly braces")]
+  #[test_case("🇬🇧{a,b,*}", "🇬🇧a" ; "UK flag with curly braces wildcard")]
+  #[test_case("a*🇳🇴", "a🇳🇴" ; "latin letter with wildcard and flag emoji")]
+  #[test_case("{🇳🇴,🇬🇧}", "🇳🇴" ; "emoji in curly braces")]
+  #[test_case("🇩🇪?z", "🇩🇪🇩🇪z" ; "Germany flag wildcard emoji")]
+  #[test_case("j[🇬🇧-🇳🇴]", "j🇬🇧" ; "latin letter with flag emoji range match")]
+  fn unicode(glob: &str, path: &str) {
+    assert!(
+      glob_match(glob, path),
+      "`{}` doesn't match `{}`",
+      path,
+      glob
+    );
+  }
 
   #[test_case("abc", "abc")]
   #[test_case("*", "abc")]

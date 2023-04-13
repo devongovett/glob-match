@@ -68,3 +68,25 @@ Data {
     input: "some input",
 }
 ```
+
+## Grapheme Support
+
+This library by default only considers single bytes at a time which can cause
+issues with matching against multi-byte unicode characters. Support for this
+can be enabled with the `unic-segment` feature, which uses a grapheme cursor
+to ensure that entire graphemes are respected.
+
+> **What is a grapheme?**
+> 
+> In short, a single 'symbol' on your screen. Not all
+> unicode characters are the same. Some take up a single byte, some up to
+> 4 bytes (UTF-8), and some even more than that depending on the type of
+> data. A UTF-8 codepoint is equivalent to a rust `char` which is a fixed 
+> 4 bytes in length. ASCII is a single byte, emoji can be up to 4 bytes (😱), 
+> but it is possible to have 'symbols' that are composed of multiple UTF-8 
+> codepoints such as flags 🇳🇴 or families 👨‍👩‍👦‍👦 which have 2 and 4 codepoints.
+> A collection of codepoints that make up a 'symbol' is your grapheme.
+
+This comes roughly at a 17% performance penalty, and is still significantly
+faster than glob and globset. Ranges are handled using a byte-by-byte 
+comparison. See the tests for examples on how this works.
