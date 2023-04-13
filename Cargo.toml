@@ -10,6 +10,7 @@ edition = "2021"
 criterion = "0.4.0"
 glob = "0.3.1"
 globset = "0.4.10"
+test-case = "3.1.0"
 
 [[bench]]
 name = "bench"
