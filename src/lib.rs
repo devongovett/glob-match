@@ -25,26 +25,27 @@ struct Wildcard {
 type Capture = Range<usize>;
 
 pub fn glob_match(glob: &str, path: &str) -> bool {
-  glob_match_internal(glob, path, None)
+  let glob = glob.as_bytes();
+  let path = path.as_bytes();
+  glob_match_raw(glob, path, None)
 }
 
 pub fn glob_match_with_captures<'a>(glob: &str, path: &'a str) -> Option<Vec<Capture>> {
   let mut captures = Vec::new();
-  if glob_match_internal(glob, path, Some(&mut captures)) {
+  let glob = glob.as_bytes();
+  let path = path.as_bytes();
+  if glob_match_raw(glob, path, Some(&mut captures)) {
     return Some(captures);
   }
   None
 }
 
-fn glob_match_internal<'a>(
-  glob: &str,
-  path: &'a str,
+pub fn glob_match_raw<'a>(
+  glob: &[u8],
+  path: &'a [u8],
   mut captures: Option<&mut Vec<Capture>>,
 ) -> bool {
   // This algorithm is based on https://research.swtch.com/glob
-  let glob = glob.as_bytes();
-  let path = path.as_bytes();
-
   let mut state = State::default();
 
   // Store the state when we see an opening '{' brace in a stack.
