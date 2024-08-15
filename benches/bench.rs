@@ -28,5 +28,9 @@ fn globset_crate(b: &mut Criterion) {
   b.bench_function("globset_crate", |b| b.iter(|| assert!(globset(GLOB, PATH))));
 }
 
-criterion_group!(benches, globset_crate, glob_crate, glob_match_crate);
+fn fast_glob_crate(b: &mut Criterion) {
+  b.bench_function("fast_glob_crate", |b| b.iter(|| assert!(fast_glob::glob_match(GLOB, PATH))));
+}
+
+criterion_group!(benches, globset_crate, glob_crate, glob_match_crate, fast_glob_crate);
 criterion_main!(benches);
