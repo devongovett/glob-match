@@ -107,7 +107,7 @@ fn glob_match_internal<'a>(
               }
 
               // The allows_sep flag allows separator characters in ** matches.
-              // one is a '/', which prevents a/**/b from matching a/bb.
+              // one is a '/', which prevents a/**/b from matching a/b.
               state.globstar = state.wildcard;
             }
           } else {
@@ -120,8 +120,14 @@ fn glob_match_internal<'a>(
             && state.path_index < path.len()
             && is_separator(path[state.path_index] as char)
           {
-            // Special case: don't jump back for a / at the end of the glob.
-            if state.globstar.path_index > 0 && state.path_index + 1 < path.len() {
+            
+            if state.glob_index < glob.len() && is_separator(glob[state.glob_index] as char) {
+              state.glob_index += 1;
+              state.path_index += 1;
+              state.wildcard.glob_index = state.globstar.glob_index;
+              state.wildcard.path_index = state.globstar.path_index;
+              state.wildcard.capture_index = state.globstar.capture_index;
+            } else if state.globstar.path_index > 0 && state.path_index + 1 < path.len() { // Special case: don't jump back for a / at the end of the glob.
               state.glob_index = state.globstar.glob_index as usize;
               state.capture_index = state.globstar.capture_index as usize;
               state.wildcard.glob_index = state.globstar.glob_index;
@@ -263,11 +269,6 @@ fn glob_match_internal<'a>(
             }
             state.glob_index += 1;
             state.path_index += 1;
-
-            // If this is not a separator, lock in the previous globstar.
-            if c != b'/' {
-              state.globstar.path_index = 0;
-            }
             continue;
           }
         }
@@ -450,6 +451,9 @@ impl State {
 #[inline(always)]
 fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
   // Coalesce multiple ** segments into one.
+
+  // Only entire path components can be skipped.
+  // i.e. '**' in the pattern 'a/**/**/b' can match multiple path components, but in 'a/**/**b' it cannot.
   while glob_index + 3 <= glob.len()
     && unsafe { glob.get_unchecked(glob_index..glob_index + 3) } == b"/**"
   {
@@ -626,6 +630,8 @@ mod tests {
     assert!(!glob_match("a/{a{a,b},b}", "a/c"));
     assert!(glob_match("a/{b,c[}]*}", "a/b"));
     assert!(glob_match("a/{b,c[}]*}", "a/c}xx"));
+
+    assert!(glob_match("*/*.css", ".a/b.css"));
   }
 
   // The below tests are based on Bash and micromatch.
@@ -633,6 +639,7 @@ mod tests {
   // Converted using the following find and replace regex:
   // find: assert\(([!])?isMatch\('(.*?)', ['"](.*?)['"]\)\);
   // replace: assert!($1glob_match("$3", "$2"));
+
 
   #[test]
   fn bash() {
@@ -1600,6 +1607,15 @@ mod tests {
     assert!(glob_match("a/**", "a/b/c/d"));
     assert!(glob_match("a/**/*", "a/b/c/d"));
     assert!(glob_match("a/**/**/*", "a/b/c/d"));
+
+    assert!(glob_match("/**/*a", "/a/a"));
+    assert!(glob_match("**/*.js", "a/b.c/c.js"));
+    assert!(glob_match("**/**/*.js", "a/b.c/c.js"));
+    assert!(glob_match("a/**/*.d", "a/b/c.d"));
+    assert!(glob_match("a/**/*.d", "a/.b/c.d"));
+
+    assert!(glob_match("**/*/**", "a/b/c"));
+    assert!(glob_match("**/*/c.js", "a/b/c.js"));
   }
 
   #[test]
