@@ -176,14 +176,26 @@ fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          return state.expand_braces(glob, path);
+          if state.expand_brace(glob, path) {
+            return true
+          }
         }
         b'}' => {
-          state.skip_braces(glob);
+          match state.skip_braces(glob) {
+            BraceState::Invalid => {
+              return false;
+            },
+            BraceState::EndBrace => (),
+          }
           continue;
         }
         b',' if state.brace_depth > 0 => {
-          state.skip_braces(glob);
+          match state.skip_braces(glob) {
+            BraceState::Invalid => {
+              return false;
+            },
+            BraceState::EndBrace => (),
+          }
           continue;
         }
         mut c if state.path_index < path.len() => {
@@ -255,35 +267,43 @@ impl State {
     self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn expand_braces(&mut self, glob: &[u8], path: &[u8]) -> bool {
-    let mut braces = 0_i32;
+  fn expand_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
+    let mut brace_depth = 0_i32;
     let mut in_brackets = false;
     while self.glob_index < glob.len() {
       match glob[self.glob_index] {
         // Skip nested braces.
         b'{' if !in_brackets => {
           self.glob_index += 1;
-          braces += 1;
-          if braces == 1 {
+          brace_depth += 1;
+          if brace_depth == 1 {
             let mut branch_state = self.clone();
-            branch_state.brace_depth += braces;
-            if glob_match_from(glob, path, branch_state) {
+            branch_state.wildcard.path_index = 0;
+            branch_state.globstar.path_index = 0;
+            branch_state.brace_depth += brace_depth;
+            branch_state.glob_index = 0;
+            branch_state.path_index = 0;
+            if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
               return true;
             }
           }
         },
         b'}' if !in_brackets => {
           self.glob_index += 1;
-          braces -= 1;
-          if self.brace_depth + braces == 0 {
+          brace_depth -= 1;
+          if self.brace_depth + brace_depth == 0 {
             return false;
           }
         },
-        b',' if braces == 1 && !in_brackets => {
+        b',' if brace_depth == 1 && !in_brackets => {
           self.glob_index += 1;
           let mut branch_state = self.clone();
-          branch_state.brace_depth += braces;
-          if glob_match_from(glob, path, branch_state) {
+          branch_state.wildcard.path_index = 0;
+          branch_state.globstar.path_index = 0;
+          branch_state.brace_depth += brace_depth;
+          branch_state.glob_index = 0;
+          branch_state.path_index = 0;
+          if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
             return true;
           }
         }
@@ -450,6 +470,7 @@ mod tests {
       "some/**/{a,b,c}/**/needle.txt",
       "some/foo/d/bigger/path/to/the/crazy/needle.txt"
     ));
+
     assert!(glob_match("a/{a{a,b},b}", "a/aa"));
     assert!(glob_match("a/{a{a,b},b}", "a/ab"));
     assert!(!glob_match("a/{a{a,b},b}", "a/ac"));
