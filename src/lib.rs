@@ -94,7 +94,6 @@ pub fn glob_match(
               state.path_index += 1;
               state.wildcard.glob_index = state.globstar.glob_index;
               state.wildcard.path_index = state.globstar.path_index;
-              state.wildcard.capture_index = state.globstar.capture_index;
             } else if state.globstar.path_index > 0 && state.path_index + 1 < path.len() { // Special case: don't jump back for a / at the end of the glob.
               state.glob_index = state.globstar.glob_index as usize;
               state.wildcard.glob_index = state.globstar.glob_index;
