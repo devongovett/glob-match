@@ -21,3 +21,6 @@ harness = false
 lto = true
 codegen-units = 1
 panic = 'abort'
+
+[dependencies]
+arrayvec = "0.7.4"
