@@ -6,7 +6,7 @@ struct State {
   path_index: usize,
   glob_index: usize,
   brace_depth: i32,
-  brace_track: Vec<u32>,
+  brace_track: Option<Vec<u8>>,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -32,7 +32,7 @@ pub fn glob_match(
     path_index: 0,
     glob_index: 0,
     brace_depth: 0,
-    brace_track: vec![0; glob.len()],
+    brace_track: None,
     wildcard: Default::default(),
     globstar: Default::default(),
   };
@@ -184,7 +184,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          let branch_index = unsafe { *state.brace_track.get_unchecked(state.glob_index) };
+          let branch_index = unsafe { *state.brace_track.get_or_insert_with(|| vec![0;glob.len()]).get_unchecked(state.glob_index) };
           if branch_index == 0 {
             return state.match_brace(glob, path);
           } else {
@@ -281,12 +281,16 @@ impl State {
   }
 
   fn match_brace_branch(&mut self, glob: &[u8], path: &[u8], brace_index: usize, brace_depth: i32) -> bool {
-    self.brace_track[brace_index] = (self.glob_index + 1) as u32;
+    {
+      let brace_track = self.brace_track.get_or_insert_with(|| vec![0;glob.len()]);
+      brace_track[brace_index] = (self.glob_index + 1) as u8;
+    }
     let mut branch_state = self.clone();
     branch_state.glob_index += 1;
     branch_state.brace_depth = brace_depth;
     let matched = glob_match_from(glob, path, &mut branch_state);
-    self.brace_track[brace_index] = 0;
+    let brace_track = self.brace_track.as_mut().unwrap();
+    brace_track[brace_index] = (self.glob_index + 1) as u8;
     matched
   }
 
