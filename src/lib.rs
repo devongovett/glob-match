@@ -290,6 +290,7 @@ impl State {
           brace_depth += 1;
           if brace_depth == self.brace_depth + 1 {
             if self.match_brace_branch(glob, path, brace_depth) {
+              self.glob_index += 1;
               return true;
             }
           }
@@ -297,10 +298,11 @@ impl State {
         b'}' if !in_brackets => brace_depth -= 1,
         b',' if brace_depth == self.brace_depth + 1 => {
           if self.match_brace_branch(glob, path, brace_depth) {
+            self.glob_index += 1;
             return true;
           }
         }
-        b'[' => in_brackets = true,
+        b'[' if !in_brackets => in_brackets = true,
         b']' => in_brackets = false,
         _ => ()
       }
@@ -313,27 +315,26 @@ impl State {
   }
 
   fn skip_braces(&mut self, glob: &[u8]) -> BraceState {
-    let mut braces = 1_i32;
     let mut in_brackets = false;
-    while self.glob_index < glob.len() && braces > 0 {
+    if self.brace_depth == 0 {
+      return BraceState::Invalid;
+    }
+    while self.glob_index < glob.len() && self.brace_depth > 0 {
       match glob[self.glob_index] {
         // Skip nested braces.
-        b'{' if !in_brackets => braces += 1,
-        b'}' if !in_brackets => {
-          braces -= 1;
-          if braces + self.brace_depth == 0 {
-            return BraceState::EndBrace;
-          } else if braces + self.brace_depth < 0 {
-            return BraceState::Invalid;
-          }
-        },
+        b'{' if !in_brackets => self.brace_depth += 1,
+        b'}' if !in_brackets => self.brace_depth -= 1,
         b'[' if !in_brackets => in_brackets = true,
         b']' => in_brackets = false,
         _ => ()
       }
       self.glob_index += 1;
     }
-    BraceState::EndBrace
+    if self.brace_depth == 0 {
+      return BraceState::EndBrace;
+    } else {
+      return BraceState::Invalid;
+    }
   }
 }
 
