@@ -2086,6 +2086,14 @@ mod tests {
   }
 
   #[test]
+  fn mine() {
+    assert!(glob_match(
+      "**/{**/a/b/c/d,e/a}/{b/c/d/e/f,a}",
+      "e/e/a/b/c/d/e/f"
+    ));
+  }
+
+  #[test]
   fn fuzz_tests() {
     // https://github.com/devongovett/glob-match/issues/1
     let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
