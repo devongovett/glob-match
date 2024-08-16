@@ -6,7 +6,7 @@ struct State {
   path_index: usize,
   glob_index: usize,
   brace_depth: i32,
-  longest_brace_match: u32,
+  brace_track: Vec<u32>,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -28,7 +28,10 @@ pub fn glob_match(
   let glob = glob.as_bytes();
   let path = path.as_bytes();
 
-  let mut state = State::default();
+  let mut state = State {
+    brace_track: vec![0; glob.len()],
+    ..Default::default()
+  };
 
   // First, check if the pattern is negated with a leading '!' character.
   // Multiple negations can occur.
@@ -177,8 +180,13 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          if state.match_brace(glob, path) {
-            return true
+          let branch_index = state.brace_track[state.glob_index];
+          if branch_index == 0 {
+            return state.match_brace(glob, path);
+          } else {
+            state.glob_index = state.brace_track[state.glob_index] as usize;
+            state.brace_depth += 1;
+            continue;
           }
         }
         b'}' => {
@@ -268,25 +276,19 @@ impl State {
     self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn match_brace_branch(&mut self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
-    let mut branch_state = State {
-      path_index: 0,
-      glob_index: 0,
-      longest_brace_match: 0,
-      brace_depth,
-      wildcard: Default::default(),
-      globstar: Default::default(),
-    };
-    let matched = glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut branch_state);
-    self.longest_brace_match = self.longest_brace_match.max((self.path_index as u32) + branch_state.longest_brace_match);
-    if self.wildcard.path_index > 0 {
-      self.wildcard.path_index = self.wildcard.path_index.max(self.longest_brace_match);
-    }
-    return matched;
+  fn match_brace_branch(&mut self, glob: &[u8], path: &[u8], brace_index: usize, brace_depth: i32) -> bool {
+    self.brace_track[brace_index] = (self.glob_index + 1) as u32;
+    let mut branch_state = self.clone();
+    branch_state.glob_index += 1;
+    branch_state.brace_depth = brace_depth;
+    let matched = glob_match_from(glob, path, &mut branch_state);
+    self.brace_track[brace_index] = 0;
+    matched
   }
 
   #[inline(always)]
   fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
+    let brace_index = self.glob_index;
     let mut brace_depth = self.brace_depth;
     let mut in_brackets = false;
 
@@ -296,16 +298,14 @@ impl State {
         b'{' if !in_brackets => {
           brace_depth += 1;
           if brace_depth == self.brace_depth + 1 {
-            if self.match_brace_branch(glob, path, brace_depth) {
-              self.glob_index += 1;
+            if self.match_brace_branch(glob, path, brace_index, brace_depth) {
               return true;
             }
           }
         },
         b'}' if !in_brackets => brace_depth -= 1,
         b',' if brace_depth == self.brace_depth + 1 => {
-          if self.match_brace_branch(glob, path, brace_depth) {
-            self.glob_index += 1;
+          if self.match_brace_branch(glob, path, brace_index, brace_depth) {
             return true;
           }
         }
