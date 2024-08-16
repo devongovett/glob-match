@@ -97,7 +97,6 @@ fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
             && state.path_index < path.len()
             && is_separator(path[state.path_index] as char)
           {
-            
             if state.glob_index < glob.len() && is_separator(glob[state.glob_index] as char) {
               state.glob_index += 1;
               state.path_index += 1;
@@ -106,6 +105,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
               state.wildcard.brace_depth = state.globstar.brace_depth;
             } else if state.globstar.path_index > 0 && state.path_index + 1 < path.len() { // Special case: don't jump back for a / at the end of the glob.
               state.glob_index = state.globstar.glob_index as usize;
+              state.brace_depth = state.globstar.brace_depth;
               state.wildcard.glob_index = state.globstar.glob_index;
             } else {
               state.wildcard.path_index = 0;
@@ -176,7 +176,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          if state.expand_brace(glob, path) {
+          if state.match_brace(glob, path) {
             return true
           }
         }
@@ -267,55 +267,46 @@ impl State {
     self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn expand_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
-    let mut brace_depth = 0_i32;
+  fn match_brace_branch(&self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
+    let state = State {
+      path_index: 0,
+      glob_index: 0,
+      brace_depth,
+      wildcard: Default::default(),
+      globstar: Default::default(),
+    };
+    glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], state)
+  }
+
+  #[inline(always)]
+  fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
+    let mut brace_depth = self.brace_depth;
     let mut in_brackets = false;
+
     while self.glob_index < glob.len() {
       match glob[self.glob_index] {
         // Skip nested braces.
         b'{' if !in_brackets => {
-          self.glob_index += 1;
           brace_depth += 1;
-          if brace_depth == 1 {
-            let mut branch_state = self.clone();
-            branch_state.wildcard.path_index = 0;
-            branch_state.globstar.path_index = 0;
-            branch_state.brace_depth += brace_depth;
-            branch_state.glob_index = 0;
-            branch_state.path_index = 0;
-            if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
+          if brace_depth == self.brace_depth + 1 {
+            if self.match_brace_branch(glob, path, brace_depth) {
               return true;
             }
           }
         },
-        b'}' if !in_brackets => {
-          self.glob_index += 1;
-          brace_depth -= 1;
-          if self.brace_depth + brace_depth == 0 {
-            return false;
-          }
-        },
-        b',' if brace_depth == 1 && !in_brackets => {
-          self.glob_index += 1;
-          let mut branch_state = self.clone();
-          branch_state.wildcard.path_index = 0;
-          branch_state.globstar.path_index = 0;
-          branch_state.brace_depth += brace_depth;
-          branch_state.glob_index = 0;
-          branch_state.path_index = 0;
-          if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
+        b'}' if !in_brackets => brace_depth -= 1,
+        b',' if brace_depth == self.brace_depth + 1 => {
+          if self.match_brace_branch(glob, path, brace_depth) {
             return true;
           }
         }
-        b'[' => {
-          self.glob_index += 1;
-          in_brackets = true;
-        },
-        b']' => {
-          self.glob_index += 1;
-          in_brackets = false;
-        },
-        _ => self.glob_index += 1
+        b'[' => in_brackets = true,
+        b']' => in_brackets = false,
+        _ => ()
+      }
+      self.glob_index += 1;
+      if brace_depth == 0 {
+        return false;
       }
     }
     return false;
