@@ -6,6 +6,7 @@ struct State {
   path_index: usize,
   glob_index: usize,
   brace_depth: i32,
+  longest_match: u32,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -267,15 +268,21 @@ impl State {
     self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn match_brace_branch(&self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
-    let mut state = State {
+  fn match_brace_branch(&mut self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
+    let mut branch_state = State {
       path_index: 0,
       glob_index: 0,
+      longest_match: 0,
       brace_depth,
       wildcard: Default::default(),
       globstar: Default::default(),
     };
-    glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut state)
+    let matched = glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut branch_state);
+    self.longest_match = self.longest_match.max((self.path_index as u32) + branch_state.longest_match);
+    if self.wildcard.path_index > 0 {
+      self.wildcard.path_index = self.wildcard.path_index.max(self.longest_match);
+    }
+    return matched;
   }
 
   #[inline(always)]
@@ -2078,13 +2085,12 @@ mod tests {
     ));
   }
 
-
-  // #[test]
-  // fn fuzz_tests() {
-  //   // https://github.com/devongovett/glob-match/issues/1
-  //   let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
-  //   assert!(!glob_match(s, s));
-  //   let s = "**** *{*{??*{??***\u{5} *{*{??*{??***\u{5},\0U\0}]*****\u{1},\0***\0,\0\0}w****,\0U\0}]*****\u{1},\0***\0,\0\0}w*****\u{1}***{}*.*\0\0*\0";
-  //   assert!(!glob_match(s, s));
-  // }
+  #[test]
+  fn fuzz_tests() {
+    // https://github.com/devongovett/glob-match/issues/1
+    let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
+    assert!(!glob_match(s, s));
+    let s = "**** *{*{??*{??***\u{5} *{*{??*{??***\u{5},\0U\0}]*****\u{1},\0***\0,\0\0}w****,\0U\0}]*****\u{1},\0***\0,\0\0}w*****\u{1}***{}*.*\0\0*\0";
+    assert!(!glob_match(s, s));
+  }
 }
