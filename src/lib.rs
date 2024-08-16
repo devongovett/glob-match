@@ -29,8 +29,12 @@ pub fn glob_match(
   let path = path.as_bytes();
 
   let mut state = State {
+    path_index: 0,
+    glob_index: 0,
+    brace_depth: 0,
     brace_track: vec![0; glob.len()],
-    ..Default::default()
+    wildcard: Default::default(),
+    globstar: Default::default(),
   };
 
   // First, check if the pattern is negated with a leading '!' character.
@@ -180,11 +184,11 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          let branch_index = state.brace_track[state.glob_index];
+          let branch_index = unsafe { *state.brace_track.get_unchecked(state.glob_index) };
           if branch_index == 0 {
             return state.match_brace(glob, path);
           } else {
-            state.glob_index = state.brace_track[state.glob_index] as usize;
+            state.glob_index = branch_index as usize;
             state.brace_depth += 1;
             continue;
           }
