@@ -1,12 +1,11 @@
 use std::path::is_separator;
 
-use arrayvec::ArrayVec;
-
 #[derive(Clone, Debug, Default)]
 struct State {
   // These store character indices into the glob and path strings.
   path_index: usize,
   glob_index: usize,
+  brace_depth: i32,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -18,21 +17,17 @@ struct Wildcard {
   // Using u32 rather than usize for these results in 10% faster performance.
   glob_index: u32,
   path_index: u32,
+  brace_depth: i32,
 }
 
 pub fn glob_match(
   glob: &str,
   path: &str
 ) -> bool {
-  // This algorithm is based on https://research.swtch.com/glob
   let glob = glob.as_bytes();
   let path = path.as_bytes();
 
   let mut state = State::default();
-
-  // Store the state when we see an opening '{' brace in a stack.
-  // Up to 10 nested braces are supported.
-  let mut brace_stack = BraceStack::default();
 
   // First, check if the pattern is negated with a leading '!' character.
   // Multiple negations can occur.
@@ -41,6 +36,17 @@ pub fn glob_match(
     negated = !negated;
     state.glob_index += 1;
   }
+
+  let matched = glob_match_from(glob, path, state);
+  if negated {
+    !matched
+  } else {
+    matched
+  }
+}
+
+fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
+  // This algorithm is based on https://research.swtch.com/glob
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
     if state.glob_index < glob.len() {
@@ -54,6 +60,7 @@ pub fn glob_match(
 
           state.wildcard.glob_index = state.glob_index as u32;
           state.wildcard.path_index = state.path_index as u32 + 1;
+          state.wildcard.brace_depth = state.brace_depth;
 
           // ** allows path separators, whereas * does not.
           // However, ** must be a full path component, i.e. a/**/b not a**b.
@@ -96,23 +103,12 @@ pub fn glob_match(
               state.path_index += 1;
               state.wildcard.glob_index = state.globstar.glob_index;
               state.wildcard.path_index = state.globstar.path_index;
+              state.wildcard.brace_depth = state.globstar.brace_depth;
             } else if state.globstar.path_index > 0 && state.path_index + 1 < path.len() { // Special case: don't jump back for a / at the end of the glob.
               state.glob_index = state.globstar.glob_index as usize;
               state.wildcard.glob_index = state.globstar.glob_index;
             } else {
               state.wildcard.path_index = 0;
-            }
-          }
-
-          // If the next char is a special brace separator,
-          // skip to the end of the braces so we don't try to match it.
-          if brace_stack.len() > 0
-            && state.glob_index < glob.len()
-            && matches!(glob[state.glob_index], b',' | b'}')
-          {
-            if state.skip_braces(glob, false) == BraceState::Invalid {
-              // invalid pattern!
-              return false;
             }
           }
 
@@ -180,32 +176,26 @@ pub fn glob_match(
           }
         }
         b'{' if state.path_index < path.len() => {
-          if brace_stack.len() >= brace_stack.capacity() {
-            // Invalid pattern! Too many nested braces.
-            return false;
+          if state.expand_brace(glob, path) {
+            return true
           }
-
-          // Push old state to the stack, and reset current state.
-          state = brace_stack.track(state);
+        }
+        b'}' => {
+          match state.skip_braces(glob) {
+            BraceState::Invalid => {
+              return false;
+            },
+            BraceState::EndBrace => (),
+          }
           continue;
         }
-        b'}' if brace_stack.len() > 0 => {
-          // If we hit the end of the braces, we matched the last option.
-          brace_stack.longest_brace_match =
-            brace_stack.longest_brace_match.max(state.path_index as u32);
-          state.glob_index += 1;
-          state = brace_stack.back(state);
-          continue;
-        }
-        b',' if brace_stack.len() > 0 => {
-          // If we hit a comma, we matched one of the options!
-          // But we still need to check the others in case there is a longer match.
-          brace_stack.longest_brace_match =
-            brace_stack.longest_brace_match.max(state.path_index as u32);
-          state.path_index = brace_stack.last().path_index;
-          state.glob_index += 1;
-          state.wildcard = Wildcard::default();
-          state.globstar = Wildcard::default();
+        b',' if state.brace_depth > 0 => {
+          match state.skip_braces(glob) {
+            BraceState::Invalid => {
+              return false;
+            },
+            BraceState::EndBrace => (),
+          }
           continue;
         }
         mut c if state.path_index < path.len() => {
@@ -222,11 +212,6 @@ pub fn glob_match(
           };
 
           if is_match {
-            if brace_stack.len() > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}'
-            {
-              brace_stack.longest_brace_match = state.path_index as u32;
-              state = brace_stack.back(state);
-            }
             state.glob_index += 1;
             state.path_index += 1;
             continue;
@@ -242,41 +227,10 @@ pub fn glob_match(
       continue;
     }
 
-    if brace_stack.len() > 0 {
-      // If in braces, find next option and reset path to index where we saw the '{'
-      match state.skip_braces(glob, true) {
-        BraceState::Invalid => return false,
-        BraceState::Comma => {
-          state.path_index = brace_stack.last().path_index;
-          continue;
-        }
-        BraceState::EndBrace => {}
-      }
-
-      // Hit the end. Pop the stack.
-      // If we matched a previous option, use that.
-      if brace_stack.longest_brace_match > 0 {
-        state = brace_stack.back(state);
-        continue;
-      } else {
-        // Didn't match. Restore state, and check if we need to jump back to a star pattern.
-        state = brace_stack.pop();
-        if state.wildcard.path_index > 0 && state.wildcard.path_index as usize <= path.len() {
-          state.backtrack();
-          continue;
-        }
-      }
-    }
-
-    return negated;
+    return false;
   }
 
-  if brace_stack.len() > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}' {
-    brace_stack.longest_brace_match = state.path_index as u32;
-    brace_stack.back(state);
-  }
-
-  !negated
+  true
 }
 
 #[inline(always)]
@@ -302,7 +256,6 @@ fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
 #[derive(PartialEq)]
 enum BraceState {
   Invalid,
-  Comma,
   EndBrace,
 }
 
@@ -311,48 +264,84 @@ impl State {
   fn backtrack(&mut self) {
     self.glob_index = self.wildcard.glob_index as usize;
     self.path_index = self.wildcard.path_index as usize;
+    self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn skip_braces(
-    &mut self,
-    glob: &[u8],
-    stop_on_comma: bool,
-  ) -> BraceState {
-    let mut braces = 1;
+  fn expand_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
+    let mut brace_depth = 0_i32;
+    let mut in_brackets = false;
+    while self.glob_index < glob.len() {
+      match glob[self.glob_index] {
+        // Skip nested braces.
+        b'{' if !in_brackets => {
+          self.glob_index += 1;
+          brace_depth += 1;
+          if brace_depth == 1 {
+            let mut branch_state = self.clone();
+            branch_state.wildcard.path_index = 0;
+            branch_state.globstar.path_index = 0;
+            branch_state.brace_depth += brace_depth;
+            branch_state.glob_index = 0;
+            branch_state.path_index = 0;
+            if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
+              return true;
+            }
+          }
+        },
+        b'}' if !in_brackets => {
+          self.glob_index += 1;
+          brace_depth -= 1;
+          if self.brace_depth + brace_depth == 0 {
+            return false;
+          }
+        },
+        b',' if brace_depth == 1 && !in_brackets => {
+          self.glob_index += 1;
+          let mut branch_state = self.clone();
+          branch_state.wildcard.path_index = 0;
+          branch_state.globstar.path_index = 0;
+          branch_state.brace_depth += brace_depth;
+          branch_state.glob_index = 0;
+          branch_state.path_index = 0;
+          if glob_match_from(&glob[self.glob_index..], &path[self.path_index..], branch_state) {
+            return true;
+          }
+        }
+        b'[' => {
+          self.glob_index += 1;
+          in_brackets = true;
+        },
+        b']' => {
+          self.glob_index += 1;
+          in_brackets = false;
+        },
+        _ => self.glob_index += 1
+      }
+    }
+    return false;
+  }
+
+  fn skip_braces(&mut self, glob: &[u8]) -> BraceState {
+    let mut braces = 1_i32;
     let mut in_brackets = false;
     while self.glob_index < glob.len() && braces > 0 {
       match glob[self.glob_index] {
         // Skip nested braces.
         b'{' if !in_brackets => braces += 1,
-        b'}' if !in_brackets => braces -= 1,
-        b',' if stop_on_comma && braces == 1 && !in_brackets => {
-          self.glob_index += 1;
-          return BraceState::Comma;
-        }
-        c @ (b'*' | b'?' | b'[') if !in_brackets => {
-          if c == b'[' {
-            in_brackets = true;
+        b'}' if !in_brackets => {
+          braces -= 1;
+          if braces + self.brace_depth == 0 {
+            return BraceState::EndBrace;
+          } else if braces + self.brace_depth < 0 {
+            return BraceState::Invalid;
           }
-          if c == b'*' {
-            if self.glob_index + 1 < glob.len() && glob[self.glob_index + 1] == b'*' {
-              self.glob_index = skip_globstars(glob, self.glob_index + 2) - 2;
-              self.glob_index += 1;
-            }
-          }
-        }
+        },
+        b'[' if !in_brackets => in_brackets = true,
         b']' => in_brackets = false,
-        b'\\' => {
-          self.glob_index += 1;
-        }
-        _ => {}
+        _ => ()
       }
       self.glob_index += 1;
     }
-
-    if braces != 0 {
-      return BraceState::Invalid;
-    }
-
     BraceState::EndBrace
   }
 }
@@ -378,57 +367,6 @@ fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
   }
 
   glob_index
-}
-
-#[derive(Default)]
-struct BraceStack {
-  stack: ArrayVec<State, 10>,
-  longest_brace_match: u32,
-}
-
-impl BraceStack {
-  #[inline(always)]
-  fn track(&mut self, state: State) -> State {
-    // Push old state to the stack, and reset current state.
-    let next_state = State {
-      path_index: state.path_index,
-      glob_index: state.glob_index + 1,
-      ..State::default()
-    };
-    self.stack.push(state);
-    next_state
-  }
-
-  #[inline(always)]
-  fn back(&mut self, state: State) -> State {
-    let mut last_state = self.stack.pop().unwrap();
-    last_state.path_index = self.longest_brace_match as usize;
-    last_state.glob_index = state.glob_index;
-    if self.stack.is_empty() {
-      self.longest_brace_match = 0;
-    }
-    last_state
-  }
-
-  #[inline(always)]
-  fn pop(&mut self) -> State {
-    self.stack.pop().unwrap()
-  }
-
-  #[inline(always)]
-  fn last(&self) -> &State {
-    self.stack.last().unwrap()
-  }
-
-  #[inline(always)]
-  fn len(&self) -> usize {
-    self.stack.len()
-  }
-
-  #[inline(always)]
-  fn capacity(&self) -> usize {
-    self.stack.capacity()
-  }
 }
 
 #[cfg(test)]
@@ -532,6 +470,7 @@ mod tests {
       "some/**/{a,b,c}/**/needle.txt",
       "some/foo/d/bigger/path/to/the/crazy/needle.txt"
     ));
+
     assert!(glob_match("a/{a{a,b},b}", "a/aa"));
     assert!(glob_match("a/{a{a,b},b}", "a/ab"));
     assert!(!glob_match("a/{a{a,b},b}", "a/ac"));
@@ -540,7 +479,13 @@ mod tests {
     assert!(glob_match("a/{b,c[}]*}", "a/b"));
     assert!(glob_match("a/{b,c[}]*}", "a/c}xx"));
 
-    assert!(glob_match("*/*.css", ".a/b.css"));
+    assert!(glob_match("/**/*a", "/a/a"));
+    assert!(glob_match("**/*.js", "a/b.c/c.js"));
+    assert!(glob_match("**/**/*.js", "a/b.c/c.js"));
+    assert!(glob_match("a/**/*.d", "a/b/c.d"));
+    assert!(glob_match("a/**/*.d", "a/.b/c.d"));
+    assert!(glob_match("**/*/**", "a/b/c"));
+    assert!(glob_match("**/*/c.js", "a/b/c.js"));
   }
 
   // The below tests are based on Bash and micromatch.
@@ -1943,11 +1888,211 @@ mod tests {
   }
 
   #[test]
-  fn fuzz_tests() {
-    // https://github.com/devongovett/glob-match/issues/1
-    let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
-    assert!(!glob_match(s, s));
-    let s = "**** *{*{??*{??***\u{5} *{*{??*{??***\u{5},\0U\0}]*****\u{1},\0***\0,\0\0}w****,\0U\0}]*****\u{1},\0***\0,\0\0}w*****\u{1}***{}*.*\0\0*\0";
-    assert!(!glob_match(s, s));
+  fn webpack() {
+    // Match everything
+    assert!(glob_match("**/*", "foo"));
+
+    // Match the end
+    assert!(glob_match("**/f*", "foo"));
+
+    // Match the start
+    assert!(glob_match("**/*o", "foo"));
+
+    // Match the middle
+    assert!(glob_match("**/f*uck", "firetruck"));
+
+    // Don't match without Regexp 'g'
+    assert!(!glob_match("**/uc", "firetruck"));
+
+    // Match zero characters
+    assert!(glob_match("**/f*uck", "fuck"));
+
+    // More complex matches
+    assert!(glob_match("**/*.min.js", "some/jquery.min.js"));
+    assert!(glob_match("**/*.min.*", "some/jquery.min.js"));
+    assert!(glob_match("*/js/*.js", "some/js/jquery.min.js"));
+
+    // More complex matches with RegExp 'g' flag (complex regression)
+    assert!(glob_match("**/*.min.*", "some/jquery.min.js"));
+    assert!(glob_match("**/*.min.js", "some/jquery.min.js"));
+    assert!(glob_match("*/js/*.js", "some/js/jquery.min.js"));
+
+    assert!(!glob_match(
+      "\\\\/$^+?.()=!|{},[].*",
+      "\\/$^+?.()=!|{},[].*"
+    ));
+
+    // Equivalent matches without/with using RegExp 'g'
+    assert!(!glob_match("**/.min.", "some/jquery.min.js"));
+    assert!(glob_match("**/*.min.*", "some/jquery.min.js"));
+    assert!(!glob_match("**/.min.", "some/jquery.min.js"));
+
+    assert!(!glob_match("**/min.js", "some/jquery.min.js"));
+    assert!(glob_match("**/*.min.js", "some/jquery.min.js"));
+    assert!(!glob_match("**/min.js", "some/jquery.min.js"));
+
+    // Match anywhere (globally) using RegExp 'g'
+    assert!(!glob_match("**/min", "some/jquery.min.js"));
+    assert!(!glob_match("/js/", "some/js/jquery.min.js"));
+
+    assert!(!glob_match("/js*jq*.js", "some/js/jquery.min.js"));
+
+    // Extended mode
+
+    // ?: Match one character, no more and no less
+    assert!(glob_match("**/f?o", "foo"));
+    assert!(!glob_match("**/f?o", "fooo"));
+    assert!(!glob_match("**/f?oo", "foo"));
+
+    // ?: Match one character with RegExp 'g'
+    assert!(glob_match("**/f?o", "foo"));
+    assert!(!glob_match("**/f?o", "fooo"));
+    assert!(glob_match("**/f?o?", "fooo"));
+    assert!(!glob_match("**/?fo", "fooo"));
+    assert!(!glob_match("**/f?oo", "foo"));
+    assert!(!glob_match("**/foo?", "foo"));
+
+    // []: Match a character range
+    assert!(glob_match("**/fo[oz]", "foo"));
+    assert!(glob_match("**/fo[oz]", "foz"));
+    assert!(!glob_match("**/fo[oz]", "fog"));
+
+    // []: Match a character range and RegExp 'g' (regresion)
+    assert!(glob_match("**/fo[oz]", "foo"));
+    assert!(glob_match("**/fo[oz]", "foz"));
+    assert!(!glob_match("**/fo[oz]", "fog"));
+
+    // {}: Match a choice of different substrings
+    assert!(glob_match("**/foo{bar,baaz}", "foobaaz"));
+    assert!(glob_match("**/foo{bar,baaz}", "foobar"));
+    assert!(!glob_match("**/foo{bar,baaz}", "foobuzz"));
+    assert!(glob_match("**/foo{bar,b*z}", "foobuzz"));
+
+    // {}: Match a choice of different substrings and RegExp 'g' (regression)
+    assert!(glob_match("**/foo{bar,baaz}", "foobaaz"));
+    assert!(glob_match("**/foo{bar,baaz}", "foobar"));
+    assert!(!glob_match("**/foo{bar,baaz}", "foobuzz"));
+
+    // More complex extended matches
+    assert!(glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "foo.baaz.com/jquery.min.js"
+    ));
+    assert!(glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.buzz.com/index.html"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.buzz.com/index.htm"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.bar.com/index.html"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "flozz.buzz.com/index.html"
+    ));
+
+    // More complex extended matches and RegExp 'g' (regresion)
+    assert!(glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "foo.baaz.com/jquery.min.js"
+    ));
+    assert!(glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.buzz.com/index.html"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.buzz.com/index.htm"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "moz.bar.com/index.html"
+    ));
+    assert!(!glob_match(
+      "?o[oz].b*z.com/{*.js,*.html}",
+      "flozz.buzz.com/index.html"
+    ));
+
+    // globstar
+    assert!(glob_match(
+      "some/**/{*.js,*.html}",
+      "some/bar/jquery.min.js"
+    ));
+    assert!(glob_match(
+      "some/**/{*.js,*.html}",
+      "some/bar/baz/jquery.min.js"
+    ));
+    assert!(glob_match("some/**", "some/bar/baz/jquery.min.js"));
+
+    assert!(glob_match("\\\\/$^+.()=!|,.*", "\\/$^+.()=!|,.*"));
+
+    // globstar specific tests
+    assert!(glob_match("/foo/*", "/foo/bar.txt"));
+    assert!(glob_match("/foo/**", "/foo/baz.txt"));
+    assert!(glob_match("/foo/**", "/foo/bar/baz.txt"));
+    assert!(glob_match("/foo/*/*.txt", "/foo/bar/baz.txt"));
+    assert!(glob_match("/foo/**/*.txt", "/foo/bar/baz.txt"));
+    assert!(glob_match("/foo/**/*.txt", "/foo/bar/baz/qux.txt"));
+    assert!(glob_match("/foo/**/bar.txt", "/foo/bar.txt"));
+    assert!(glob_match("/foo/**/**/bar.txt", "/foo/bar.txt"));
+    assert!(glob_match("/foo/**/*/baz.txt", "/foo/bar/baz.txt"));
+    assert!(glob_match("/foo/**/*.txt", "/foo/bar.txt"));
+    assert!(glob_match("/foo/**/**/*.txt", "/foo/bar.txt"));
+    assert!(glob_match("/foo/**/*/*.txt", "/foo/bar/baz.txt"));
+    assert!(glob_match("**/*.txt", "/foo/bar/baz/qux.txt"));
+    assert!(glob_match("**/foo.txt", "foo.txt"));
+    assert!(glob_match("**/*.txt", "foo.txt"));
+
+    assert!(!glob_match("/foo/*", "/foo/bar/baz.txt"));
+    assert!(!glob_match("/foo/*.txt", "/foo/bar/baz.txt"));
+    assert!(!glob_match("/foo/*/*.txt", "/foo/bar/baz/qux.txt"));
+    assert!(!glob_match("/foo/*/bar.txt", "/foo/bar.txt"));
+    assert!(!glob_match("/foo/*/*/baz.txt", "/foo/bar/baz.txt"));
+    assert!(!glob_match("/foo/**.txt", "/foo/bar/baz/qux.txt"));
+    // assert!(!glob_match("/foo/bar**/*.txt", "/foo/bar/baz/qux.txt"));
+    // assert!(!glob_match("/foo/bar**", "/foo/bar/baz.txt"));
+    assert!(!glob_match("**/.txt", "/foo/bar/baz/qux.txt"));
+    assert!(!glob_match("*/*.txt", "/foo/bar/baz/qux.txt"));
+    assert!(!glob_match("*/*.txt", "foo.txt"));
+
+    assert!(!glob_match("some/*", "some/bar/baz/jquery.min.js"));
+
+    assert!(!glob_match("some/*", "some/bar/baz/jquery.min.js"));
+    assert!(glob_match("some/**", "some/bar/baz/jquery.min.js"));
+
+    assert!(glob_match(
+      "some/*/*/jquery.min.js",
+      "some/bar/baz/jquery.min.js"
+    ));
+    assert!(glob_match(
+      "some/**/jquery.min.js",
+      "some/bar/baz/jquery.min.js"
+    ));
+    assert!(glob_match(
+      "some/*/*/jquery.min.js",
+      "some/bar/baz/jquery.min.js"
+    ));
+    assert!(!glob_match(
+      "some/*/jquery.min.js",
+      "some/bar/baz/jquery.min.js"
+    ));
+    assert!(!glob_match(
+      "some/*/jquery.min.js",
+      "some/bar/baz/jquery.min.js"
+    ));
   }
+
+
+  // #[test]
+  // fn fuzz_tests() {
+  //   // https://github.com/devongovett/glob-match/issues/1
+  //   let s = "{*{??*{??**,Uz*zz}w**{*{**a,z***b*[!}w??*azzzzzzzz*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!z[za,z&zz}w**z*z*}";
+  //   assert!(!glob_match(s, s));
+  //   let s = "**** *{*{??*{??***\u{5} *{*{??*{??***\u{5},\0U\0}]*****\u{1},\0***\0,\0\0}w****,\0U\0}]*****\u{1},\0***\0,\0\0}w*****\u{1}***{}*.*\0\0*\0";
+  //   assert!(!glob_match(s, s));
+  // }
 }
