@@ -37,7 +37,7 @@ pub fn glob_match(
     state.glob_index += 1;
   }
 
-  let matched = glob_match_from(glob, path, state);
+  let matched = glob_match_from(glob, path, &mut state);
   if negated {
     !matched
   } else {
@@ -45,7 +45,7 @@ pub fn glob_match(
   }
 }
 
-fn glob_match_from(glob: &[u8], path: &[u8], mut state: State) -> bool {
+fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
   // This algorithm is based on https://research.swtch.com/glob
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
@@ -268,14 +268,14 @@ impl State {
   }
 
   fn match_brace_branch(&self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
-    let state = State {
+    let mut state = State {
       path_index: 0,
       glob_index: 0,
       brace_depth,
       wildcard: Default::default(),
       globstar: Default::default(),
     };
-    glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], state)
+    glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut state)
   }
 
   #[inline(always)]
