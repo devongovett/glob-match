@@ -1,36 +1,47 @@
 use codspeed_criterion_compat::{criterion_group, criterion_main, Criterion};
 use glob_match::*;
 
-const PATH: &'static str = "some/a/bigger/path/to/the/crazy/needle.txt";
-const GLOB: &'static str = "some/**/needle.txt";
+fn simple_expansion(c: &mut Criterion) {
+  let mut group = c.benchmark_group("simple_expansion");
 
-#[inline]
-fn glob(pat: &str, s: &str) -> bool {
-  let pat = glob::Pattern::new(pat).unwrap();
-  pat.matches(s)
+  const GLOB: &'static str = "some/**/n*d[k-m]e?txt";
+  const PATH: &'static str = "some/a/bigger/path/to/the/crazy/needle.txt";
+
+  group.bench_function("mine", |b| {
+    b.iter(|| assert!(glob_match(GLOB, PATH)))
+  });
+
+  group.bench_function("fast-glob", |b| {
+    b.iter(|| assert!(fast_glob::glob_match_with_brace(GLOB, PATH)))
+  });
+
+  group.bench_function("glob-match", |b| {
+    b.iter(|| assert!(glob_match::glob_match(GLOB, PATH)))
+  });
+
+  group.finish();
 }
 
-#[inline]
-fn globset(pat: &str, s: &str) -> bool {
-  let pat = globset::Glob::new(pat).unwrap().compile_matcher();
-  pat.is_match(s)
+fn brace_expansion(c: &mut Criterion) {
+  let mut group = c.benchmark_group("brace_expansion");
+
+  const GLOB: &'static str = "some/**/{tob,crazy}/?*.{png,txt}";
+  const PATH: &'static str = "some/a/bigger/path/to/the/crazy/needle.txt";
+
+  group.bench_function("mine", |b| {
+    b.iter(|| assert!(glob_match(GLOB, PATH)))
+  });
+
+  group.bench_function("fast-glob", |b| {
+    b.iter(|| assert!(fast_glob::glob_match_with_brace(GLOB, PATH)));
+  });
+
+  group.bench_function("glob-match", |b| {
+    b.iter(|| assert!(glob_match::glob_match(GLOB, PATH)))
+  });
+
+  group.finish();
 }
 
-fn glob_match_crate(b: &mut Criterion) {
-  b.bench_function("mine", |b| b.iter(|| assert!(glob_match(GLOB, PATH))));
-}
-
-fn glob_crate(b: &mut Criterion) {
-  b.bench_function("glob_crate", |b| b.iter(|| assert!(glob(GLOB, PATH))));
-}
-
-fn globset_crate(b: &mut Criterion) {
-  b.bench_function("globset_crate", |b| b.iter(|| assert!(globset(GLOB, PATH))));
-}
-
-fn fast_glob_crate(b: &mut Criterion) {
-  b.bench_function("fast_glob_crate", |b| b.iter(|| assert!(fast_glob::glob_match_with_brace(GLOB, PATH))));
-}
-
-criterion_group!(benches, globset_crate, glob_crate, glob_match_crate, fast_glob_crate);
+criterion_group!(benches, simple_expansion, brace_expansion);
 criterion_main!(benches);
