@@ -16,7 +16,7 @@ fn simple_expansion(c: &mut Criterion) {
   });
 
   group.bench_function("glob-match", |b| {
-    b.iter(|| assert!(glob_match::glob_match(GLOB, PATH)))
+    b.iter(|| assert!(origin_glob_match::glob_match(GLOB, PATH)))
   });
 
   group.finish();
@@ -37,7 +37,7 @@ fn brace_expansion(c: &mut Criterion) {
   });
 
   group.bench_function("glob-match", |b| {
-    b.iter(|| assert!(glob_match::glob_match(GLOB, PATH)))
+    b.iter(|| assert!(origin_glob_match::glob_match(GLOB, PATH)))
   });
 
   group.finish();
