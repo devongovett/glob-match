@@ -6,7 +6,7 @@ struct State {
   path_index: usize,
   glob_index: usize,
   brace_depth: i32,
-  longest_match: u32,
+  longest_brace_match: u32,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -272,15 +272,15 @@ impl State {
     let mut branch_state = State {
       path_index: 0,
       glob_index: 0,
-      longest_match: 0,
+      longest_brace_match: 0,
       brace_depth,
       wildcard: Default::default(),
       globstar: Default::default(),
     };
     let matched = glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut branch_state);
-    self.longest_match = self.longest_match.max((self.path_index as u32) + branch_state.longest_match);
+    self.longest_brace_match = self.longest_brace_match.max((self.path_index as u32) + branch_state.longest_brace_match);
     if self.wildcard.path_index > 0 {
-      self.wildcard.path_index = self.wildcard.path_index.max(self.longest_match);
+      self.wildcard.path_index = self.wildcard.path_index.max(self.longest_brace_match);
     }
     return matched;
   }

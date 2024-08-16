@@ -12,6 +12,7 @@ criterion = "0.4.0"
 fast-glob = "0.3.2"
 glob = "0.3.1"
 globset = "0.4.10"
+origin_glob_match = { package = "glob-match", version = "0.2.1" }
 
 [[bench]]
 name = "bench"
