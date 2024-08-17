@@ -5,8 +5,6 @@ struct State {
   // These store character indices into the glob and path strings.
   path_index: usize,
   glob_index: usize,
-  brace_depth: i32,
-  longest_brace_match: u32,
 
   // When we hit a * or **, we store the state for backtracking.
   wildcard: Wildcard,
@@ -18,7 +16,6 @@ struct Wildcard {
   // Using u32 rather than usize for these results in 10% faster performance.
   glob_index: u32,
   path_index: u32,
-  brace_depth: i32,
 }
 
 pub fn glob_match(
@@ -61,7 +58,6 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
 
           state.wildcard.glob_index = state.glob_index as u32;
           state.wildcard.path_index = state.path_index as u32 + 1;
-          state.wildcard.brace_depth = state.brace_depth;
 
           // ** allows path separators, whereas * does not.
           // However, ** must be a full path component, i.e. a/**/b not a**b.
@@ -103,10 +99,8 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
               state.path_index += 1;
               state.wildcard.glob_index = state.globstar.glob_index;
               state.wildcard.path_index = state.globstar.path_index;
-              state.wildcard.brace_depth = state.globstar.brace_depth;
             } else if state.globstar.path_index > 0 && state.path_index + 1 < path.len() { // Special case: don't jump back for a / at the end of the glob.
               state.glob_index = state.globstar.glob_index as usize;
-              state.brace_depth = state.globstar.brace_depth;
               state.wildcard.glob_index = state.globstar.glob_index;
             } else {
               state.wildcard.path_index = 0;
@@ -177,27 +171,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
           }
         }
         b'{' if state.path_index < path.len() => {
-          if state.match_brace(glob, path) {
-            return true
-          }
-        }
-        b'}' => {
-          match state.skip_braces(glob) {
-            BraceState::Invalid => {
-              return false;
-            },
-            BraceState::EndBrace => (),
-          }
-          continue;
-        }
-        b',' if state.brace_depth > 0 => {
-          match state.skip_braces(glob) {
-            BraceState::Invalid => {
-              return false;
-            },
-            BraceState::EndBrace => (),
-          }
-          continue;
+          return state.match_brace(glob, path);
         }
         mut c if state.path_index < path.len() => {
           // Match escaped characters as literals.
@@ -234,7 +208,6 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
   true
 }
 
-#[inline(always)]
 fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
   if *c == b'\\' {
     *glob_index += 1;
@@ -254,98 +227,90 @@ fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
   true
 }
 
-#[derive(PartialEq)]
-enum BraceState {
-  Invalid,
-  EndBrace,
-}
-
 impl State {
-  #[inline(always)]
   fn backtrack(&mut self) {
     self.glob_index = self.wildcard.glob_index as usize;
     self.path_index = self.wildcard.path_index as usize;
-    self.brace_depth = self.wildcard.brace_depth;
   }
 
-  fn match_brace_branch(&mut self, glob: &[u8], path: &[u8], brace_depth: i32) -> bool {
-    let mut branch_state = State {
-      path_index: 0,
-      glob_index: 0,
-      longest_brace_match: 0,
-      brace_depth,
-      wildcard: Default::default(),
-      globstar: Default::default(),
-    };
-    let matched = glob_match_from(&glob[self.glob_index + 1..], &path[self.path_index..], &mut branch_state);
-    self.longest_brace_match = self.longest_brace_match.max((self.path_index as u32) + branch_state.longest_brace_match);
-    if self.wildcard.path_index > 0 {
-      self.wildcard.path_index = self.wildcard.path_index.max(self.longest_brace_match);
-    }
-    return matched;
+  fn match_brace_branch(&self, glob: &[u8], path: &[u8], open_brace_index: usize, close_brace_index: usize, branch_index: usize, buffer: &mut Vec<u8>) -> bool {
+    buffer.extend_from_slice(&glob[..open_brace_index]);
+    buffer.extend_from_slice(&glob[branch_index..self.glob_index]);
+    buffer.extend_from_slice(&glob[close_brace_index + 1..]);
+
+    let mut branch_state = self.clone();
+    branch_state.glob_index = open_brace_index;
+    let matched = glob_match_from(&buffer, path, &mut branch_state);
+    buffer.clear();
+    matched
   }
 
-  #[inline(always)]
   fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
-    let mut brace_depth = self.brace_depth;
+    let mut brace_depth = 0;
     let mut in_brackets = false;
 
-    while self.glob_index < glob.len() {
-      match glob[self.glob_index] {
-        // Skip nested braces.
-        b'{' if !in_brackets => {
-          brace_depth += 1;
-          if brace_depth == self.brace_depth + 1 {
-            if self.match_brace_branch(glob, path, brace_depth) {
-              self.glob_index += 1;
-              return true;
-            }
+    let open_brace_index = self.glob_index;
+    let mut close_brace_index = 0;
+    let mut glob_index = self.glob_index;
+    while glob_index < glob.len() {
+      match glob[glob_index] {
+        b'{' if !in_brackets => brace_depth += 1,
+        b'}' if !in_brackets => {
+          brace_depth -= 1;
+          if brace_depth == 0 {
+            close_brace_index = glob_index;
+            break;
           }
         },
-        b'}' if !in_brackets => brace_depth -= 1,
-        b',' if brace_depth == self.brace_depth + 1 => {
-          if self.match_brace_branch(glob, path, brace_depth) {
-            self.glob_index += 1;
+        b'[' if !in_brackets => in_brackets = true,
+        b']' => in_brackets = false,
+        b'\\' => glob_index += 1,
+        _ => ()
+      }
+      glob_index += 1;
+    }
+    if brace_depth != 0 {
+      // Invalid pattern!
+      return false;
+    }
+
+    let mut buffer = Vec::with_capacity(glob.len());
+
+    let mut branch_index = 0;
+    while self.glob_index < glob.len() {
+      match glob[self.glob_index] {
+        b'{' if !in_brackets => {
+          brace_depth += 1;
+          if brace_depth == 1 {
+            branch_index = self.glob_index + 1;
+          }
+        },
+        b'}' if !in_brackets => {
+          brace_depth -= 1;
+          if brace_depth == 0 {
+            if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
+              return true;
+            }
+            break;
+          }
+        }
+        b',' if brace_depth == 1 => {
+          if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
             return true;
           }
+          branch_index = self.glob_index + 1;
         }
         b'[' if !in_brackets => in_brackets = true,
         b']' => in_brackets = false,
+        b'\\' => self.glob_index += 1,
         _ => ()
       }
       self.glob_index += 1;
-      if brace_depth == 0 {
-        return false;
-      }
     }
     return false;
   }
-
-  fn skip_braces(&mut self, glob: &[u8]) -> BraceState {
-    let mut in_brackets = false;
-    if self.brace_depth == 0 {
-      return BraceState::Invalid;
-    }
-    while self.glob_index < glob.len() && self.brace_depth > 0 {
-      match glob[self.glob_index] {
-        // Skip nested braces.
-        b'{' if !in_brackets => self.brace_depth += 1,
-        b'}' if !in_brackets => self.brace_depth -= 1,
-        b'[' if !in_brackets => in_brackets = true,
-        b']' => in_brackets = false,
-        _ => ()
-      }
-      self.glob_index += 1;
-    }
-    if self.brace_depth == 0 {
-      return BraceState::EndBrace;
-    } else {
-      return BraceState::Invalid;
-    }
-  }
 }
 
-#[inline(always)]
 fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
   // Coalesce multiple ** segments into one.
 
@@ -2082,6 +2047,14 @@ mod tests {
     assert!(!glob_match(
       "some/*/jquery.min.js",
       "some/bar/baz/jquery.min.js"
+    ));
+  }
+
+  #[test]
+  fn mine() {
+    assert!(glob_match(
+      "**/{**/a/b/c/d,e/a}/{b/c/d/e/f,a}",
+      "e/e/a/b/c/d/e/f"
     ));
   }
 
