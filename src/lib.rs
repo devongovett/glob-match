@@ -208,7 +208,6 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
   true
 }
 
-#[inline(always)]
 fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
   if *c == b'\\' {
     *glob_index += 1;
@@ -229,7 +228,6 @@ fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
 }
 
 impl State {
-  #[inline(always)]
   fn backtrack(&mut self) {
     self.glob_index = self.wildcard.glob_index as usize;
     self.path_index = self.wildcard.path_index as usize;
@@ -246,7 +244,6 @@ impl State {
     glob_match_from(&expanded_glob, path, &mut branch_state)
   }
 
-  #[inline(always)]
   fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
     let mut brace_depth = 0;
     let mut in_brackets = false;
@@ -311,7 +308,6 @@ impl State {
   }
 }
 
-#[inline(always)]
 fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
   // Coalesce multiple ** segments into one.
 
