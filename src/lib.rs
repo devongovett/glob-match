@@ -286,12 +286,13 @@ impl State {
           }
         },
         b'}' if !in_brackets => {
-          if brace_depth == 1 {
+          brace_depth -= 1;
+          if brace_depth == 0 {
             if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index) {
               return true;
             }
+            break;
           }
-          brace_depth -= 1;
         }
         b',' if brace_depth == 1 => {
           if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index) {
@@ -305,9 +306,6 @@ impl State {
         _ => ()
       }
       self.glob_index += 1;
-      if brace_depth == 0 {
-        return false;
-      }
     }
     return false;
   }
