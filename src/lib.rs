@@ -233,15 +233,16 @@ impl State {
     self.path_index = self.wildcard.path_index as usize;
   }
 
-  fn match_brace_branch(&self, glob: &[u8], path: &[u8], open_brace_index: usize, close_brace_index: usize, branch_index: usize) -> bool {
-    let mut expanded_glob = Vec::with_capacity(glob.len());
-    expanded_glob.extend_from_slice(&glob[..open_brace_index]);
-    expanded_glob.extend_from_slice(&glob[branch_index..self.glob_index]);
-    expanded_glob.extend_from_slice(&glob[close_brace_index + 1..]);
+  fn match_brace_branch(&self, glob: &[u8], path: &[u8], open_brace_index: usize, close_brace_index: usize, branch_index: usize, buffer: &mut Vec<u8>) -> bool {
+    buffer.extend_from_slice(&glob[..open_brace_index]);
+    buffer.extend_from_slice(&glob[branch_index..self.glob_index]);
+    buffer.extend_from_slice(&glob[close_brace_index + 1..]);
 
     let mut branch_state = self.clone();
     branch_state.glob_index = open_brace_index;
-    glob_match_from(&expanded_glob, path, &mut branch_state)
+    let matched = glob_match_from(&buffer, path, &mut branch_state);
+    buffer.clear();
+    matched
   }
 
   fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
@@ -273,6 +274,8 @@ impl State {
       return false;
     }
 
+    let mut buffer = Vec::with_capacity(glob.len());
+
     let mut branch_index = 0;
     while self.glob_index < glob.len() {
       match glob[self.glob_index] {
@@ -285,14 +288,14 @@ impl State {
         b'}' if !in_brackets => {
           brace_depth -= 1;
           if brace_depth == 0 {
-            if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index) {
+            if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
               return true;
             }
             break;
           }
         }
         b',' if brace_depth == 1 => {
-          if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index) {
+          if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
             return true;
           }
           branch_index = self.glob_index + 1;
