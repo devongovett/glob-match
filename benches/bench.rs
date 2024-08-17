@@ -11,6 +11,10 @@ fn simple_expansion(c: &mut Criterion) {
     b.iter(|| assert!(glob_match(GLOB, PATH)))
   });
 
+  group.bench_function("fast-glob normal", |b| {
+    b.iter(|| assert!(fast_glob::glob_match(GLOB, PATH)))
+  });
+
   group.bench_function("fast-glob", |b| {
     b.iter(|| assert!(fast_glob::glob_match_with_brace(GLOB, PATH)))
   });
