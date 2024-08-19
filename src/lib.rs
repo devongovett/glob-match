@@ -1,4 +1,4 @@
-use std::path::is_separator;
+use std::{cell::RefCell, path::is_separator};
 
 #[derive(Clone, Debug, Default)]
 struct State {
@@ -18,39 +18,58 @@ struct Wildcard {
   path_index: u32,
 }
 
-pub fn glob_match(
-  glob: &str,
-  path: &str
-) -> bool {
-  let glob = glob.as_bytes();
-  let path = path.as_bytes();
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MatchOptions {
+  /// Whether or not patterns should be matched in a case-sensitive manner.
+  /// This currently only considers upper/lower case relationships between
+  /// ASCII characters, but in future this might be extended to work with
+  /// Unicode.
+  pub case_sensitive: bool,
+}
 
-  let mut state = State::default();
+pub struct Pattern {
+  state: RefCell<State>,
+  glob: Vec<char>,
+}
 
-  // First, check if the pattern is negated with a leading '!' character.
-  // Multiple negations can occur.
-  let mut negated = false;
-  while state.glob_index < glob.len() && glob[state.glob_index] == b'!' {
-    negated = !negated;
-    state.glob_index += 1;
+impl Pattern {
+  pub fn new(glob: &str) -> Self {
+    Self {
+      state: RefCell::new(State::default()),
+      glob: glob.chars().collect::<Vec<_>>(),
+    }
   }
 
-  let matched = glob_match_from(glob, path, &mut state);
-  if negated {
-    !matched
-  } else {
-    matched
+  pub fn matches(self, path: &str) -> bool {
+    let path = path.chars().collect::<Vec<_>>();
+    let mut state = self.state.borrow_mut();
+    let glob = &self.glob;
+
+    // First, check if the pattern is negated with a leading '!' character.
+    // Multiple negations can occur.
+    let mut negated = false;
+    while state.glob_index < glob.len() && glob[state.glob_index] == '!' {
+      negated = !negated;
+      state.glob_index += 1;
+    }
+
+    let matched = glob_match_from(glob, &path, &mut state);
+    if negated {
+      !matched
+    } else {
+      matched
+    }
   }
 }
 
-fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
+fn glob_match_from(glob: &[char], path: &[char], state: &mut State) -> bool {
   // This algorithm is based on https://research.swtch.com/glob
 
   while state.glob_index < glob.len() || state.path_index < path.len() {
     if state.glob_index < glob.len() {
       match glob[state.glob_index] {
-        b'*' => {
-          let is_globstar = state.glob_index + 1 < glob.len() && glob[state.glob_index + 1] == b'*';
+        '*' => {
+          let is_globstar = state.glob_index + 1 < glob.len() && glob[state.glob_index + 1] == '*';
           if is_globstar {
             // Coalesce multiple ** segments into one.
             state.glob_index = skip_globstars(glob, state.glob_index + 2) - 2;
@@ -67,8 +86,8 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
             if glob.len() == state.glob_index {
               // A trailing ** segment without a following separator.
               state.globstar = state.wildcard;
-            } else if (state.glob_index < 3 || glob[state.glob_index - 3] == b'/')
-              && glob[state.glob_index] == b'/'
+            } else if (state.glob_index < 3 || glob[state.glob_index - 3] == '/')
+              && glob[state.glob_index] == '/'
             {
               // Matched a full /**/ segment. If the last character in the path was a separator,
               // skip the separator in the glob so we search for the next character.
@@ -109,20 +128,20 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
 
           continue;
         }
-        b'?' if state.path_index < path.len() => {
+        '?' if state.path_index < path.len() => {
           if !is_separator(path[state.path_index] as char) {
             state.glob_index += 1;
             state.path_index += 1;
             continue;
           }
         }
-        b'[' if state.path_index < path.len() => {
+        '[' if state.path_index < path.len() => {
           state.glob_index += 1;
           let c = path[state.path_index];
 
           // Check if the character class is negated.
           let mut negated = false;
-          if state.glob_index < glob.len() && matches!(glob[state.glob_index], b'^' | b'!') {
+          if state.glob_index < glob.len() && matches!(glob[state.glob_index], '^' | '!') {
             negated = true;
             state.glob_index += 1;
           }
@@ -130,7 +149,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
           // Try each range.
           let mut first = true;
           let mut is_match = false;
-          while state.glob_index < glob.len() && (first || glob[state.glob_index] != b']') {
+          while state.glob_index < glob.len() && (first || glob[state.glob_index] != ']') {
             let mut low = glob[state.glob_index];
             if !unescape(&mut low, glob, &mut state.glob_index) {
               // Invalid pattern!
@@ -140,8 +159,8 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
 
             // If there is a - and the following character is not ], read the range end character.
             let high = if state.glob_index + 1 < glob.len()
-              && glob[state.glob_index] == b'-'
-              && glob[state.glob_index + 1] != b']'
+              && glob[state.glob_index] == '-'
+              && glob[state.glob_index + 1] != ']'
             {
               state.glob_index += 1;
               let mut high = glob[state.glob_index];
@@ -170,7 +189,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
             continue;
           }
         }
-        b'{' if state.path_index < path.len() => {
+        '{' if state.path_index < path.len() => {
           return state.match_brace(glob, path);
         }
         mut c if state.path_index < path.len() => {
@@ -180,7 +199,7 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
             return false;
           }
 
-          let is_match = if c == b'/' {
+          let is_match = if c == '/' {
             is_separator(path[state.path_index] as char)
           } else {
             path[state.path_index] == c
@@ -208,19 +227,19 @@ fn glob_match_from(glob: &[u8], path: &[u8], state: &mut State) -> bool {
   true
 }
 
-fn unescape(c: &mut u8, glob: &[u8], glob_index: &mut usize) -> bool {
-  if *c == b'\\' {
+fn unescape(c: &mut char, glob: &[char], glob_index: &mut usize) -> bool {
+  if *c == '\\' {
     *glob_index += 1;
     if *glob_index >= glob.len() {
       // Invalid pattern!
       return false;
     }
     *c = match glob[*glob_index] {
-      b'a' => b'\x61',
-      b'b' => b'\x08',
-      b'n' => b'\n',
-      b'r' => b'\r',
-      b't' => b'\t',
+      'a' => '\x61',
+      'b' => '\x08',
+      'n' => '\n',
+      'r' => '\r',
+      't' => '\t',
       c => c,
     }
   }
@@ -233,7 +252,7 @@ impl State {
     self.path_index = self.wildcard.path_index as usize;
   }
 
-  fn match_brace_branch(&self, glob: &[u8], path: &[u8], open_brace_index: usize, close_brace_index: usize, branch_index: usize, buffer: &mut Vec<u8>) -> bool {
+  fn match_brace_branch(&self, glob: &[char], path: &[char], open_brace_index: usize, close_brace_index: usize, branch_index: usize, buffer: &mut Vec<char>) -> bool {
     buffer.extend_from_slice(&glob[..open_brace_index]);
     buffer.extend_from_slice(&glob[branch_index..self.glob_index]);
     buffer.extend_from_slice(&glob[close_brace_index + 1..]);
@@ -245,7 +264,7 @@ impl State {
     matched
   }
 
-  fn match_brace(&mut self, glob: &[u8], path: &[u8]) -> bool {
+  fn match_brace(&mut self, glob: &[char], path: &[char]) -> bool {
     let mut brace_depth = 0;
     let mut in_brackets = false;
 
@@ -254,17 +273,17 @@ impl State {
     let mut glob_index = self.glob_index;
     while glob_index < glob.len() {
       match glob[glob_index] {
-        b'{' if !in_brackets => brace_depth += 1,
-        b'}' if !in_brackets => {
+        '{' if !in_brackets => brace_depth += 1,
+        '}' if !in_brackets => {
           brace_depth -= 1;
           if brace_depth == 0 {
             close_brace_index = glob_index;
             break;
           }
         },
-        b'[' if !in_brackets => in_brackets = true,
-        b']' => in_brackets = false,
-        b'\\' => glob_index += 1,
+        '[' if !in_brackets => in_brackets = true,
+        ']' => in_brackets = false,
+        '\\' => glob_index += 1,
         _ => ()
       }
       glob_index += 1;
@@ -279,13 +298,13 @@ impl State {
     let mut branch_index = 0;
     while self.glob_index < glob.len() {
       match glob[self.glob_index] {
-        b'{' if !in_brackets => {
+        '{' if !in_brackets => {
           brace_depth += 1;
           if brace_depth == 1 {
             branch_index = self.glob_index + 1;
           }
         },
-        b'}' if !in_brackets => {
+        '}' if !in_brackets => {
           brace_depth -= 1;
           if brace_depth == 0 {
             if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
@@ -294,15 +313,15 @@ impl State {
             break;
           }
         }
-        b',' if brace_depth == 1 => {
+        ',' if brace_depth == 1 => {
           if self.match_brace_branch(glob, path, open_brace_index, close_brace_index, branch_index, &mut buffer) {
             return true;
           }
           branch_index = self.glob_index + 1;
         }
-        b'[' if !in_brackets => in_brackets = true,
-        b']' => in_brackets = false,
-        b'\\' => self.glob_index += 1,
+        '[' if !in_brackets => in_brackets = true,
+        ']' => in_brackets = false,
+        '\\' => self.glob_index += 1,
         _ => ()
       }
       self.glob_index += 1;
@@ -311,13 +330,16 @@ impl State {
   }
 }
 
-fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
+fn skip_globstars(glob: &[char], mut glob_index: usize) -> usize {
   // Coalesce multiple ** segments into one.
 
   // Only entire path components can be skipped.
   // i.e. '**' in the pattern 'a/**/**/b' can match multiple path components, but in 'a/**/**b' it cannot.
   while glob_index + 4 <= glob.len()
-    && unsafe { glob.get_unchecked(glob_index..glob_index + 4) } == b"/**/"
+    && glob[glob_index] == '/'
+    && glob[glob_index + 1] == '*'
+    && glob[glob_index + 2] == '*'
+    && glob[glob_index + 3] == '/'
   {
     glob_index += 3;
   }
@@ -325,7 +347,9 @@ fn skip_globstars(glob: &[u8], mut glob_index: usize) -> usize {
   // A trailing '**' can also match multiple trailing path components.
   // i.e. the pattern '**/**/**' is valid and can match multiple components.
   if glob_index + 3 == glob.len()
-    && unsafe { glob.get_unchecked(glob_index..glob_index + 3) } == b"/**"
+    && glob[glob_index] == '/'
+    && glob[glob_index + 1] == '*'
+    && glob[glob_index + 2] == '*'
   {
     glob_index += 3;
   }

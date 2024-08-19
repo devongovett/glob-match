@@ -8,7 +8,8 @@ fn simple_expansion(c: &mut Criterion) {
   const PATH: &'static str = "some/a/bigger/path/to/the/crazy/needle.txt";
 
   group.bench_function("mine", |b| {
-    b.iter(|| assert!(glob_match(GLOB, PATH)))
+    let pattern = Pattern::new(GLOB);
+    b.iter(|| assert!(pattern.matches(PATH)))
   });
 
   group.bench_function("fast-glob normal", |b| {
@@ -33,7 +34,8 @@ fn brace_expansion(c: &mut Criterion) {
   const PATH: &'static str = "some/a/bigger/path/to/the/crazy/needle.txt";
 
   group.bench_function("mine", |b| {
-    b.iter(|| assert!(glob_match(GLOB, PATH)))
+    let pattern = Pattern::new(GLOB);
+    b.iter(|| assert!(pattern.matches(PATH)))
   });
 
   group.bench_function("fast-glob", |b| {
