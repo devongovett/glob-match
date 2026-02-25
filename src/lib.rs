@@ -89,8 +89,12 @@ fn glob_match_internal<'a>(
           if is_globstar {
             state.glob_index += 2;
 
-            if glob.len() == state.glob_index {
-              // A trailing ** segment without a following separator.
+            if glob.len() == state.glob_index
+              || (brace_stack.length > 0
+                && matches!(glob[state.glob_index], b'}' | b','))
+            {
+              // A trailing ** segment without a following separator
+              // (or at end of a brace alternative).
               state.globstar = state.wildcard;
             } else if (state.glob_index < 3 || glob[state.glob_index - 3] == b'/')
               && glob[state.glob_index] == b'/'
@@ -208,7 +212,7 @@ fn glob_match_internal<'a>(
             continue;
           }
         }
-        b'{' if state.path_index < path.len() => {
+        b'{' => {
           if brace_stack.length as usize >= brace_stack.stack.len() {
             // Invalid pattern! Too many nested braces.
             return false;
@@ -224,7 +228,7 @@ fn glob_match_internal<'a>(
         b'}' if brace_stack.length > 0 => {
           // If we hit the end of the braces, we matched the last option.
           brace_stack.longest_brace_match =
-            brace_stack.longest_brace_match.max(state.path_index as u32);
+            brace_stack.longest_brace_match.max(state.path_index as u32 + 1);
           state.glob_index += 1;
           state = brace_stack.pop(&state, &mut captures);
           continue;
@@ -233,7 +237,7 @@ fn glob_match_internal<'a>(
           // If we hit a comma, we matched one of the options!
           // But we still need to check the others in case there is a longer match.
           brace_stack.longest_brace_match =
-            brace_stack.longest_brace_match.max(state.path_index as u32);
+            brace_stack.longest_brace_match.max(state.path_index as u32 + 1);
           state.path_index = brace_stack.last().path_index;
           state.glob_index += 1;
           state.wildcard = Wildcard::default();
@@ -258,7 +262,7 @@ fn glob_match_internal<'a>(
 
             if brace_stack.length > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}'
             {
-              brace_stack.longest_brace_match = state.path_index as u32;
+              brace_stack.longest_brace_match = state.path_index as u32 + 1;
               state = brace_stack.pop(&state, &mut captures);
             }
             state.glob_index += 1;
@@ -315,7 +319,7 @@ fn glob_match_internal<'a>(
   }
 
   if brace_stack.length > 0 && state.glob_index > 0 && glob[state.glob_index - 1] == b'}' {
-    brace_stack.longest_brace_match = state.path_index as u32;
+    brace_stack.longest_brace_match = state.path_index as u32 + 1;
     brace_stack.pop(&state, &mut captures);
   }
 
@@ -494,7 +498,7 @@ impl BraceStack {
   fn pop(&mut self, state: &State, captures: &mut Option<&mut Vec<Capture>>) -> State {
     self.length -= 1;
     let mut state = State {
-      path_index: self.longest_brace_match as usize,
+      path_index: (self.longest_brace_match - 1) as usize,
       glob_index: state.glob_index,
       // But restore star state if needed later.
       wildcard: self.stack[self.length as usize].wildcard,
@@ -1483,7 +1487,12 @@ mod tests {
     assert!(!glob_match("a/b/**/f", "a/b/c/d/"));
     // assert!(glob_match("a/**", "a"));
     assert!(glob_match("**", "a"));
-    // assert!(glob_match("a{,/**}", "a"));
+    assert!(glob_match("a{,/**}", "a"));
+    assert!(glob_match("a{,/**}", "a/b"));
+    assert!(glob_match("a{,/**}", "a/b/c"));
+    assert!(glob_match("a{ ,**}", "a "));
+    assert!(glob_match("a{ ,**}", "a /b"));
+    assert!(glob_match("a{ ,**}", "a /b/c"));
     assert!(glob_match("**", "a/"));
     assert!(glob_match("a/**", "a/"));
     assert!(glob_match("**", "a/b/c/d"));
@@ -1908,11 +1917,11 @@ mod tests {
     assert!(!glob_match("a{,*.{foo,db},\\(bar\\)}.txt", "adb.txt"));
     assert!(glob_match("a{,*.{foo,db},\\(bar\\)}.txt", "a.db.txt"));
 
-    // assert!(glob_match("a{,.*{foo,db},\\(bar\\)}", "a"));
+    assert!(glob_match("a{,.*{foo,db},\\(bar\\)}", "a"));
     assert!(!glob_match("a{,.*{foo,db},\\(bar\\)}", "adb"));
     assert!(glob_match("a{,.*{foo,db},\\(bar\\)}", "a.db"));
 
-    // assert!(glob_match("a{,*.{foo,db},\\(bar\\)}", "a"));
+    assert!(glob_match("a{,*.{foo,db},\\(bar\\)}", "a"));
     assert!(!glob_match("a{,*.{foo,db},\\(bar\\)}", "adb"));
     assert!(glob_match("a{,*.{foo,db},\\(bar\\)}", "a.db"));
 
